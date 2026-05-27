@@ -1,0 +1,91 @@
+# Rust build artifacts
+/target/
+**/*.rlib
+**/*.rmeta
+
+# IDE & Editor
+.idea/
+.vscode/
+.DS_Store
+*.swp
+*.swo
+*~
+.vim
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+.metadata
+
+# Environment variables
+.env
+.env.local
+.env.*.local
+
+# Backup files
+**/*.rs.bk
+**/*.orig
+*.pdb
+
+# OS & Temporary files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+desktop.ini
+Thumbs.db
+
+# Testing & Coverage
+/coverage/
+*.profraw
+*.profdata
+tarpaulin-report.html
+*.lcov
+
+# Benchmarks & Profiling
+/benches/target/
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Generated files
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+*.exe
+*.out
+
+# Node (if used for build tools)
+node_modules/
+package-lock.json
+yarn.lock
+
+# Python (if used for scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+
+# Local development
+/local/
+/debug_logs/
+*.log
+
+# Claude Code
+.claude/
+
+# Extra intermediate artifacts
+/tmp/
+/target/tmp/
+/target/flycheck*/
+*.tmp
+*.temp
+*.cache
+*.d
+*.dSYM/

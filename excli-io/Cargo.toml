@@ -1,0 +1,26 @@
+[package]
+name = "excli-io"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+excli-core = { path = "../excli-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+csv.workspace = true
+zip.workspace = true
+flate2.workspace = true
+quick-xml.workspace = true
+encoding_rs.workspace = true
+chardetng.workspace = true
+chrono.workspace = true
+regex.workspace = true
+calamine.workspace = true
+tempfile.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true

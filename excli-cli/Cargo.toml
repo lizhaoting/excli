@@ -1,0 +1,28 @@
+[package]
+name = "excli-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+excli-core = { path = "../excli-core" }
+excli-io = { path = "../excli-io" }
+excli-formula = { path = "../excli-formula" }
+excli-style = { path = "../excli-style" }
+excli-ops = { path = "../excli-ops" }
+excli-i18n = { path = "../excli-i18n" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+colored.workspace = true
+indicatif.workspace = true
+console.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+pretty_assertions.workspace = true
+tempfile.workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "excli-formula"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+excli-core = { path = "../excli-core" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+chrono.workspace = true
+
+[dev-dependencies]
+rstest.workspace = true
+pretty_assertions.workspace = true
+proptest.workspace = true

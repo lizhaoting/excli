@@ -1,0 +1,65 @@
+[workspace]
+members = [
+    "excli-core",
+    "excli-io",
+    "excli-formula",
+    "excli-style",
+    "excli-ops",
+    "excli-i18n",
+    "excli-cli",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["excli contributors"]
+repository = "https://github.com/excli/excli"
+readme = "README.md"
+keywords = ["excel", "cli", "spreadsheet", "xlsx", "csv"]
+categories = ["command-line-utilities", "parsing"]
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive", "env"] }
+calamine = "0.26"
+csv = "1"
+regex = "1"
+chrono = { version = "0.4", features = ["serde"] }
+encoding_rs = "0.8"
+chardetng = "0.1"
+comfy-table = "7"
+colored = "2"
+indicatif = "0.17"
+console = "0.15"
+zip = "2"
+flate2 = "1"
+quick-xml = "0.37"
+rstest = "0.24"
+pretty_assertions = "1"
+proptest = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+unicode-segmentation = "1"
+unicode-normalization = "0.1"
+log = "0.4"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "allow"
+pedantic = "allow"
+nursery = "allow"
+cargo = "allow"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
