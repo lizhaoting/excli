@@ -6,7 +6,7 @@ use excli_core::cell::Cell;
 use excli_core::Workbook;
 use excli_io::{reader, writer};
 use excli_ops::{
-    aggregate::{aggregate, Aggregation, AggregateOp},
+    aggregate::{aggregate, AggregateOp, Aggregation},
     filter::{filter_rows, filter_unique, FilterCondition, FilterOperator},
     merge::{merge_workbooks, JoinType},
     sort::{sort_rows, SortOrder, SortSpec},
@@ -28,6 +28,464 @@ fn write_temp_csv(dir: &tempfile::TempDir, name: &str, content: &str) -> std::pa
     let mut f = std::fs::File::create(&path).unwrap();
     f.write_all(content.as_bytes()).unwrap();
     path
+}
+
+#[test]
+fn cli_replace_edits_xlsx_without_rebuilding_other_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.xlsx");
+    let mut workbook = Workbook::new();
+    let sheet = workbook.add_sheet("Data");
+    sheet.set_cell(0, 0, Cell::string("Hello"));
+    sheet.set_cell(1, 0, Cell::number(42.0));
+    writer::write_xlsx(&path, &workbook).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args([
+            "replace",
+            path.to_str().unwrap(),
+            "--find",
+            "Hello",
+            "--replace",
+            "World",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let changed = reader::read_workbook(&path).unwrap();
+    let sheet = changed.sheet_by_name("Data").unwrap();
+    assert_eq!(sheet.get_cell(0, 0).unwrap().value.to_string(), "World");
+    assert_eq!(sheet.get_cell(1, 0).unwrap().value.to_string(), "42");
+}
+
+#[test]
+fn cli_add_sheet_preserves_existing_xlsx_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.xlsx");
+    let mut workbook = Workbook::new();
+    workbook
+        .add_sheet("Data")
+        .set_cell(0, 0, Cell::string("keep"));
+    writer::write_xlsx(&path, &workbook).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args(["sheet", "add", path.to_str().unwrap(), "--name", "Archive"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let loaded = reader::read_workbook(&path).unwrap();
+    assert_eq!(loaded.sheets.len(), 2);
+    assert_eq!(loaded.sheets[1].name, "Archive");
+    assert_eq!(
+        loaded.sheets[0].get_cell(0, 0).unwrap().value.to_string(),
+        "keep"
+    );
+}
+
+#[test]
+fn cli_rename_sheet_preserves_existing_xlsx_cells() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.xlsx");
+    let mut workbook = Workbook::new();
+    workbook
+        .add_sheet("Data")
+        .set_cell(0, 0, Cell::string("keep"));
+    writer::write_xlsx(&path, &workbook).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args(["sheet", "rename", path.to_str().unwrap(), "Data", "Sales"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let loaded = reader::read_workbook(&path).unwrap();
+    assert_eq!(loaded.sheets[0].name, "Sales");
+    assert_eq!(
+        loaded.sheets[0].get_cell(0, 0).unwrap().value.to_string(),
+        "keep"
+    );
+}
+
+#[test]
+fn cli_hide_and_unhide_preserve_existing_xlsx() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.xlsx");
+    let mut workbook = Workbook::new();
+    workbook
+        .add_sheet("Visible")
+        .set_cell(0, 0, Cell::string("keep"));
+    workbook
+        .add_sheet("Archive")
+        .set_cell(0, 0, Cell::number(42.0));
+    writer::write_xlsx(&path, &workbook).unwrap();
+
+    let binary = env!("CARGO_BIN_EXE_excli-cli");
+    let hide = std::process::Command::new(binary)
+        .args([
+            "sheet",
+            "hide",
+            path.to_str().unwrap(),
+            "--sheet",
+            "Archive",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        hide.status.success(),
+        "{}",
+        String::from_utf8_lossy(&hide.stderr)
+    );
+    let hidden = reader::read_workbook(&path).unwrap();
+    assert_eq!(
+        hidden.sheet_by_name("Archive").unwrap().state,
+        excli_core::sheet::SheetState::Hidden
+    );
+    assert_eq!(
+        hidden
+            .sheet_by_name("Visible")
+            .unwrap()
+            .get_cell(0, 0)
+            .unwrap()
+            .value
+            .to_string(),
+        "keep"
+    );
+
+    let unhide = std::process::Command::new(binary)
+        .args([
+            "sheet",
+            "unhide",
+            path.to_str().unwrap(),
+            "--sheet",
+            "Archive",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        unhide.status.success(),
+        "{}",
+        String::from_utf8_lossy(&unhide.stderr)
+    );
+    assert_eq!(
+        reader::read_workbook(&path)
+            .unwrap()
+            .sheet_by_name("Archive")
+            .unwrap()
+            .state,
+        excli_core::sheet::SheetState::Visible
+    );
+}
+
+#[test]
+fn cli_move_sheet_keeps_values_and_formulas() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.xlsx");
+    let mut workbook = Workbook::new();
+    workbook.add_sheet("A").set_cell(0, 0, Cell::string("keep"));
+    workbook.add_sheet("B").set_cell(
+        0,
+        0,
+        Cell::number(3.0).with_formula(excli_core::formula::Formula::new("=1+2")),
+    );
+    writer::write_xlsx(&path, &workbook).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args([
+            "sheet",
+            "move",
+            path.to_str().unwrap(),
+            "--sheet",
+            "B",
+            "--index",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let loaded = reader::read_workbook(&path).unwrap();
+    assert_eq!(
+        loaded
+            .sheets
+            .iter()
+            .map(|sheet| sheet.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["B", "A"]
+    );
+    assert_eq!(
+        loaded
+            .sheet_by_name("B")
+            .unwrap()
+            .get_cell(0, 0)
+            .unwrap()
+            .formula
+            .as_ref()
+            .unwrap()
+            .raw,
+        "=1+2"
+    );
+    assert_eq!(
+        loaded
+            .sheet_by_name("A")
+            .unwrap()
+            .get_cell(0, 0)
+            .unwrap()
+            .value
+            .to_string(),
+        "keep"
+    );
+}
+
+#[test]
+fn cli_formula_set_preserves_other_sheets() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.xlsx");
+    let mut workbook = Workbook::new();
+    workbook
+        .add_sheet("Data")
+        .set_cell(0, 0, Cell::number(42.0));
+    workbook
+        .add_sheet("Other")
+        .set_cell(0, 0, Cell::number(7.0));
+    writer::write_xlsx(&path, &workbook).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args([
+            "formula",
+            "set",
+            path.to_str().unwrap(),
+            "--sheet",
+            "Other",
+            "--cell",
+            "B2",
+            "--formula",
+            "=A1+1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let loaded = reader::read_workbook(&path).unwrap();
+    assert_eq!(
+        loaded
+            .sheet_by_name("Other")
+            .unwrap()
+            .get_cell(1, 1)
+            .unwrap()
+            .formula
+            .as_ref()
+            .unwrap()
+            .raw,
+        "=A1+1"
+    );
+    assert_eq!(
+        loaded
+            .sheet_by_name("Data")
+            .unwrap()
+            .get_cell(0, 0)
+            .unwrap()
+            .value
+            .to_string(),
+        "42"
+    );
+}
+
+#[test]
+fn cli_formula_set_rejects_csv_without_changing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("data.csv");
+    std::fs::write(&path, b"Amount\n7\n").unwrap();
+    let original = std::fs::read(&path).unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args([
+            "formula",
+            "set",
+            path.to_str().unwrap(),
+            "--cell",
+            "B2",
+            "--formula",
+            "=A2+1",
+        ])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
+
+#[test]
+fn cli_convert_same_excel_format_keeps_identical_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.xlsx");
+    let output_path = dir.path().join("copy.xlsx");
+    let mut workbook = Workbook::new();
+    workbook
+        .add_sheet("Data")
+        .set_cell(0, 0, Cell::string("keep"));
+    writer::write_xlsx(&input, &workbook).unwrap();
+    let before = std::fs::read(&input).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args([
+            "convert",
+            input.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(std::fs::read(&output_path).unwrap(), before);
+}
+
+#[test]
+fn cli_convert_xlsx_selected_sheet_preserves_selected_workbook_part() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("source.xlsx");
+    let output_path = dir.path().join("selected.xlsx");
+    let mut workbook = Workbook::new();
+    workbook
+        .add_sheet("Data")
+        .set_cell(0, 0, Cell::string("keep"));
+    workbook
+        .add_sheet("Other")
+        .set_cell(0, 0, Cell::string("omit"));
+    writer::write_xlsx(&input, &workbook).unwrap();
+    let result = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args([
+            "convert",
+            input.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            "--sheet",
+            "Data",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let loaded = reader::read_workbook(&output_path).unwrap();
+    assert_eq!(loaded.sheets.len(), 1);
+    assert_eq!(loaded.sheets[0].name, "Data");
+    assert_eq!(
+        loaded.sheets[0].get_cell(0, 0).unwrap().value.to_string(),
+        "keep"
+    );
+}
+
+#[test]
+fn cli_write_append_preserves_existing_excel_formulas() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.xlsx");
+    let mut workbook = Workbook::new();
+    workbook.add_sheet("Data").set_cell(
+        0,
+        0,
+        Cell::number(3.0).with_formula(excli_core::formula::Formula::new("=1+2")),
+    );
+    workbook
+        .add_sheet("Other")
+        .set_cell(0, 0, Cell::string("keep"));
+    writer::write_xlsx(&path, &workbook).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args([
+            "write",
+            path.to_str().unwrap(),
+            "--append",
+            "--sheet",
+            "Data",
+            "--data",
+            "[[12.5,true,\"a,b\"]]",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let loaded = reader::read_workbook(&path).unwrap();
+    let data = loaded.sheet_by_name("Data").unwrap();
+    assert_eq!(
+        data.get_cell(0, 0).unwrap().formula.as_ref().unwrap().raw,
+        "=1+2"
+    );
+    assert_eq!(data.get_cell(0, 1).unwrap().value.to_string(), "12.5");
+    assert_eq!(data.get_cell(1, 1).unwrap().value.to_string(), "TRUE");
+    assert_eq!(data.get_cell(2, 1).unwrap().value.to_string(), "a,b");
+    assert_eq!(
+        loaded
+            .sheet_by_name("Other")
+            .unwrap()
+            .get_cell(0, 0)
+            .unwrap()
+            .value
+            .to_string(),
+        "keep"
+    );
+
+    let csv_output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args([
+            "write",
+            path.to_str().unwrap(),
+            "--append",
+            "--sheet",
+            "Data",
+            "--data",
+            "\"item, one\",\"line\nbreak\"",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        csv_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&csv_output.stderr)
+    );
+    let after_csv = reader::read_workbook(&path).unwrap();
+    let data = after_csv.sheet_by_name("Data").unwrap();
+    assert_eq!(data.get_cell(0, 2).unwrap().value.to_string(), "item, one");
+    assert_eq!(
+        data.get_cell(1, 2).unwrap().value.to_string(),
+        "line\nbreak"
+    );
+}
+
+#[test]
+fn cli_write_requires_append_for_existing_excel() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("report.xlsx");
+    let mut workbook = Workbook::new();
+    workbook
+        .add_sheet("Data")
+        .set_cell(0, 0, Cell::string("keep"));
+    writer::write_xlsx(&path, &workbook).unwrap();
+    let before = std::fs::read(&path).unwrap();
+
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_excli-cli"))
+        .args(["write", path.to_str().unwrap(), "--data", "replacement"])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
 // ── CSV roundtrip ─────────────────────────────────────────────────────────────
@@ -127,8 +585,14 @@ fn test_sort_ascending_pipeline() {
     let result = sort_rows(sheet, &[spec]);
 
     // Rows should be sorted by Score ascending: 70, 88, 95
-    let first_score = result.get_cell(1, 0).map(|c| c.value.to_string()).unwrap_or_default();
-    let last_score = result.get_cell(1, 2).map(|c| c.value.to_string()).unwrap_or_default();
+    let first_score = result
+        .get_cell(1, 0)
+        .map(|c| c.value.to_string())
+        .unwrap_or_default();
+    let last_score = result
+        .get_cell(1, 2)
+        .map(|c| c.value.to_string())
+        .unwrap_or_default();
     assert_eq!(first_score, "70");
     assert_eq!(last_score, "95");
 }
@@ -144,7 +608,10 @@ fn test_sort_descending_pipeline() {
 
     // sort_rows sorts all rows including the header; "Val" > "5" as string so it ends up first.
     // The largest numeric value (5) is in row 1 after the header row.
-    let first_data = result.get_cell(0, 1).map(|c| c.value.to_string()).unwrap_or_default();
+    let first_data = result
+        .get_cell(0, 1)
+        .map(|c| c.value.to_string())
+        .unwrap_or_default();
     assert_eq!(first_data, "5");
 }
 
@@ -175,7 +642,10 @@ fn test_aggregate_no_groupby_count() {
 
     // One row result with count
     assert_eq!(result.row_count(), 1);
-    let val = result.get_cell(1, 0).map(|c| c.value.coerce_to_number()).unwrap_or(0.0);
+    let val = result
+        .get_cell(1, 0)
+        .map(|c| c.value.coerce_to_number())
+        .unwrap_or(0.0);
     assert_eq!(val, 4.0);
 }
 
@@ -282,7 +752,10 @@ fn test_filter_then_sort() {
     // after desc sort by col B: "Score" (string) > 95, so header stays first
     assert_eq!(sorted.row_count(), 3);
     // row 0 = header, row 1 = Alice (95), row 2 = Carol (88)
-    let first = sorted.get_cell(0, 1).map(|c| c.value.to_string()).unwrap_or_default();
+    let first = sorted
+        .get_cell(0, 1)
+        .map(|c| c.value.to_string())
+        .unwrap_or_default();
     assert_eq!(first, "Alice");
 }
 
@@ -320,7 +793,10 @@ fn test_multi_sheet_workbook() {
     assert_eq!(wb.sheet_count(), 2);
 
     let found = wb.sheet_by_name("Sheet2").unwrap();
-    assert_eq!(found.get_cell(0, 0).unwrap().value.to_string(), "Sheet2Data");
+    assert_eq!(
+        found.get_cell(0, 0).unwrap().value.to_string(),
+        "Sheet2Data"
+    );
 }
 
 // ── workbook stats ────────────────────────────────────────────────────────────
@@ -332,6 +808,6 @@ fn test_workbook_stats() {
     let stats = wb.stats();
 
     assert_eq!(stats.sheet_count, 1);
-    assert_eq!(stats.row_count, 4);  // header + 3 rows
+    assert_eq!(stats.row_count, 4); // header + 3 rows
     assert_eq!(stats.col_count, 2);
 }

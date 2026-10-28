@@ -8,6 +8,10 @@ pub struct CellStyle {
     pub border: Option<Border>,
     pub alignment: Option<Alignment>,
     pub number_format: Option<String>,
+    /// Raw OOXML number format ID, including built-in formats whose display
+    /// code depends on the workbook's locale.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number_format_id: Option<u32>,
     pub protection: Option<CellProtection>,
 }
 
@@ -19,6 +23,7 @@ impl Default for CellStyle {
             border: None,
             alignment: None,
             number_format: None,
+            number_format_id: None,
             protection: None,
         }
     }
@@ -46,6 +51,7 @@ impl CellStyle {
 
     pub fn with_number_format(mut self, fmt: impl Into<String>) -> Self {
         self.number_format = Some(fmt.into());
+        self.number_format_id = None;
         self
     }
 
@@ -380,6 +386,21 @@ pub struct ConditionalFormat {
     pub rule: ConditionalFormatRule,
 }
 
+/// Office 2010 conditional-format group retained with its extension details.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionalFormatExtension {
+    pub range: String,
+    pub rules: Vec<ConditionalFormatExtensionRule>,
+    pub raw_xml: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConditionalFormatExtensionRule {
+    pub rule_type: String,
+    pub priority: Option<u32>,
+    pub id: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ConditionalFormatRule {
     CellValue {
@@ -405,6 +426,11 @@ pub enum ConditionalFormatRule {
         icon_set: String,
         reverse: bool,
         show_value: bool,
+    },
+    /// Rule XML retained when its semantics or differential style are not modeled.
+    RawXml {
+        rule_type: String,
+        xml: String,
     },
 }
 
@@ -474,6 +500,13 @@ pub enum ValidationType {
     Custom {
         formula: String,
     },
+    /// OOXML validation semantics not represented by the specialized variants.
+    Other {
+        kind: String,
+        operator: Option<String>,
+        formula1: Option<String>,
+        formula2: Option<String>,
+    },
 }
 
 #[cfg(test)]
@@ -485,6 +518,10 @@ mod tests {
         let style = CellStyle::default();
         assert!(style.font.is_none());
         assert!(style.fill.is_none());
+        assert_eq!(style.number_format_id, None);
+        let old_json = r#"{"font":null,"fill":null,"border":null,"alignment":null,"number_format":null,"protection":null}"#;
+        let restored: CellStyle = serde_json::from_str(old_json).unwrap();
+        assert_eq!(restored.number_format_id, None);
     }
 
     #[test]

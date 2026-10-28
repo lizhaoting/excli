@@ -60,14 +60,33 @@ pub fn read_csv_from_bytes(data: &[u8], delimiter: u8) -> ExcliResult<Workbook> 
     Ok(wb)
 }
 
+/// Parse UTF-8 CSV text passed directly to a command, retaining quoted whitespace.
+pub fn parse_inline_csv(data: &str, delimiter: u8) -> ExcliResult<Vec<Vec<Cell>>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .delimiter(delimiter)
+        .has_headers(false)
+        .flexible(true)
+        .from_reader(data.as_bytes());
+    reader
+        .records()
+        .map(|record| {
+            let record = record.map_err(|error| ExcliError::Parse(error.to_string()))?;
+            Ok(record
+                .iter()
+                .map(|value| {
+                    let trimmed = value.trim();
+                    trimmed
+                        .parse::<f64>()
+                        .map_or_else(|_| Cell::string(value), Cell::number)
+                })
+                .collect())
+        })
+        .collect()
+}
+
 /// Auto-detect CSV dialect (delimiter, quote char).
 pub fn detect_csv_dialect(first_lines: &str) -> CsvDialect {
-    let delimiters = [
-        (b',', 0u32),
-        (b';', 0),
-        (b'\t', 0),
-        (b'|', 0),
-    ];
+    let delimiters = [(b',', 0u32), (b';', 0), (b'\t', 0), (b'|', 0)];
 
     let mut scores: Vec<(u8, u32)> = delimiters.iter().map(|&(d, _)| (d, 0)).collect();
 
@@ -160,7 +179,10 @@ mod tests {
         let data = b"Values\n123\n-45.67\n0\n";
         let wb = read_csv_from_bytes(data, b',').unwrap();
         let sheet = wb.sheet_by_index(0).unwrap();
-        assert!(matches!(sheet.get_cell(0, 1).unwrap().value, CellValue::Number(_)));
+        assert!(matches!(
+            sheet.get_cell(0, 1).unwrap().value,
+            CellValue::Number(_)
+        ));
     }
 
     #[test]
@@ -208,7 +230,10 @@ mod tests {
         let data = b"Flag\ntrue\nfalse\nTRUE\n";
         let wb = read_csv_from_bytes(data, b',').unwrap();
         let sheet = wb.sheet_by_index(0).unwrap();
-        assert!(matches!(sheet.get_cell(0, 1).unwrap().value, CellValue::Boolean(_)));
+        assert!(matches!(
+            sheet.get_cell(0, 1).unwrap().value,
+            CellValue::Boolean(_)
+        ));
     }
 
     #[test]
@@ -240,6 +265,9 @@ mod tests {
         let data = b"Amount\n123.45\n-67.89\n0\n";
         let wb = read_csv_from_bytes(data, b',').unwrap();
         let sheet = wb.sheet_by_index(0).unwrap();
-        assert!(matches!(sheet.get_cell(0, 1).unwrap().value, CellValue::Number(_)));
+        assert!(matches!(
+            sheet.get_cell(0, 1).unwrap().value,
+            CellValue::Number(_)
+        ));
     }
 }

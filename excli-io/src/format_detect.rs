@@ -1,7 +1,7 @@
 use std::path::Path;
 
+use excli_core::error::{ErrorCode, ExcliError, ExcliResult};
 use excli_core::types::FileFormat;
-use excli_core::error::{ExcliError, ExcliResult, ErrorCode};
 
 /// Detected encoding info.
 #[derive(Debug, Clone)]
@@ -12,14 +12,10 @@ pub struct EncodingInfo {
 
 /// Detect file format from extension and/or magic bytes.
 pub fn detect_format(path: &Path) -> ExcliResult<FileFormat> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
-    FileFormat::from_extension(ext).ok_or_else(|| {
-        ExcliError::format_not_supported(format!("Unknown extension: .{}", ext))
-    })
+    FileFormat::from_extension(ext)
+        .ok_or_else(|| ExcliError::format_not_supported(format!("Unknown extension: .{}", ext)))
 }
 
 /// Detect text encoding from raw bytes.
@@ -48,7 +44,11 @@ pub fn detect_encoding(data: &[u8]) -> EncodingInfo {
     let mut detector = chardetng::EncodingDetector::new();
     detector.feed(data, data.len() < 4096);
     let encoding = detector.guess(None, data.len() >= 4096);
-    let confidence = if detector.guess_assess(None, data.len() >= 4096).1 { 0.9 } else { 0.5 };
+    let confidence = if detector.guess_assess(None, data.len() >= 4096).1 {
+        0.9
+    } else {
+        0.5
+    };
 
     EncodingInfo {
         encoding: encoding.name().to_string(),
@@ -70,13 +70,17 @@ pub fn decode_bytes(data: &[u8], encoding_hint: Option<&str>) -> ExcliResult<Str
         detect_encoding(data).encoding
     };
 
-    let encoding = encoding_rs::Encoding::for_label(encoding_name.as_bytes())
-        .unwrap_or(encoding_rs::UTF_8);
+    let encoding =
+        encoding_rs::Encoding::for_label(encoding_name.as_bytes()).unwrap_or(encoding_rs::UTF_8);
 
     let (cow, _actual_encoding, had_errors) = encoding.decode(data);
     if had_errors {
-        String::from_utf8(data.to_vec())
-            .map_err(|_| ExcliError::new(ErrorCode::EncodingNotSupported, "Failed to decode with specified encoding"))
+        String::from_utf8(data.to_vec()).map_err(|_| {
+            ExcliError::new(
+                ErrorCode::EncodingNotSupported,
+                "Failed to decode with specified encoding",
+            )
+        })
     } else {
         Ok(cow.into_owned())
     }
@@ -84,8 +88,7 @@ pub fn decode_bytes(data: &[u8], encoding_hint: Option<&str>) -> ExcliResult<Str
 
 /// Encode string to bytes with the specified encoding.
 pub fn encode_bytes(text: &str, encoding: &str, add_bom: bool) -> ExcliResult<Vec<u8>> {
-    let enc = encoding_rs::Encoding::for_label(encoding.as_bytes())
-        .unwrap_or(encoding_rs::UTF_8);
+    let enc = encoding_rs::Encoding::for_label(encoding.as_bytes()).unwrap_or(encoding_rs::UTF_8);
 
     let (result, _actual_encoding, _had_errors) = enc.encode(text);
 
@@ -107,8 +110,16 @@ pub fn detect_encoding_all(data: &[u8]) -> Vec<EncodingInfo> {
     let mut results = vec![primary];
 
     let candidates = [
-        "utf-8", "gbk", "big5", "shift_jis", "euc-jp", "euc-kr",
-        "windows-1252", "windows-1251", "windows-1256", "windows-874",
+        "utf-8",
+        "gbk",
+        "big5",
+        "shift_jis",
+        "euc-jp",
+        "euc-kr",
+        "windows-1252",
+        "windows-1251",
+        "windows-1256",
+        "windows-874",
     ];
 
     for enc_name in &candidates {

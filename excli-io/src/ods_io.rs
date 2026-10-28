@@ -11,7 +11,7 @@ pub fn read_ods(path: &Path) -> ExcliResult<Workbook> {
 
 /// Read ODS from bytes.
 pub fn read_ods_from_bytes(data: &[u8]) -> ExcliResult<Workbook> {
-    crate::excel_io::read_excel_from_bytes(data)
+    crate::excel_io::read_excel_from_bytes_with_format(data, excli_core::types::FileFormat::Ods)
 }
 
 #[cfg(test)]

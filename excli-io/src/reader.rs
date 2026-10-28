@@ -16,12 +16,16 @@ pub fn read_workbook(path: &Path) -> ExcliResult<Workbook> {
 
 /// Read a workbook from a file with explicit format.
 pub fn read_workbook_with_format(path: &Path, format: FileFormat) -> ExcliResult<Workbook> {
-    match format {
+    let mut workbook = match format {
         FileFormat::Xlsx | FileFormat::Xlsm | FileFormat::Xlsb | FileFormat::Xls => {
             excel_io::read_excel(path)
         }
         FileFormat::Csv | FileFormat::Tsv => {
-            let delimiter = if format == FileFormat::Tsv { b'\t' } else { b',' };
+            let delimiter = if format == FileFormat::Tsv {
+                b'\t'
+            } else {
+                b','
+            };
             csv_io::read_csv(path, delimiter)
         }
         FileFormat::Ods => {
@@ -31,20 +35,26 @@ pub fn read_workbook_with_format(path: &Path, format: FileFormat) -> ExcliResult
             // Fallback: try calamine for all spreadsheet formats
             excel_io::read_excel(path)
         }
-    }
+    }?;
+    workbook.file_format = Some(format);
+    Ok(workbook)
 }
 
 /// Read a workbook from bytes (in-memory).
 pub fn read_workbook_from_bytes(data: &[u8], format: FileFormat) -> ExcliResult<Workbook> {
-    match format {
+    let mut workbook = match format {
         FileFormat::Csv | FileFormat::Tsv => {
-            let delimiter = if format == FileFormat::Tsv { b'\t' } else { b',' };
+            let delimiter = if format == FileFormat::Tsv {
+                b'\t'
+            } else {
+                b','
+            };
             csv_io::read_csv_from_bytes(data, delimiter)
         }
-        _ => {
-            excel_io::read_excel_from_bytes(data)
-        }
-    }
+        _ => excel_io::read_excel_from_bytes_with_format(data, format),
+    }?;
+    workbook.file_format = Some(format);
+    Ok(workbook)
 }
 
 /// Read only metadata (sheet names, properties) without loading all data.
@@ -126,7 +136,7 @@ mod tests {
         let path = dir.path().join("multi.csv");
         let mut f = std::fs::File::create(&path).unwrap();
         for i in 0..10 {
-            writeln!(f, "{},{},{}", i, i*2, i*3).unwrap();
+            writeln!(f, "{},{},{}", i, i * 2, i * 3).unwrap();
         }
 
         let wb = read_workbook(&path).unwrap();

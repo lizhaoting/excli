@@ -524,6 +524,10 @@ pub enum FormulaCmd {
     Set {
         file: String,
 
+        /// Worksheet to edit (defaults to the first worksheet)
+        #[arg(long)]
+        sheet: Option<String>,
+
         #[arg(long)]
         cell: Option<String>,
 

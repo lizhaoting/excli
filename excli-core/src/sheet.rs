@@ -1,9 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::cell::Cell;
-use crate::style::{
-    CellStyle, ConditionalFormat, DataValidation,
-};
+use crate::style::{CellStyle, ConditionalFormat, ConditionalFormatExtension, DataValidation};
 use crate::types::Stats;
 
 /// Represents a single worksheet in a workbook.
@@ -21,8 +19,12 @@ pub struct Sheet {
     pub shapes: Vec<Shape>,
     pub hyperlinks: Vec<Hyperlink>,
     pub comments: Vec<Comment>,
+    #[serde(default)]
+    pub threaded_comments: Vec<ThreadedComment>,
     pub data_validations: Vec<DataValidation>,
     pub conditional_formats: Vec<ConditionalFormat>,
+    #[serde(default)]
+    pub conditional_format_extensions: Vec<ConditionalFormatExtension>,
     pub auto_filter: Option<AutoFilter>,
     pub page_setup: PageSetup,
     pub pane_state: Option<PaneState>,
@@ -46,8 +48,10 @@ impl Sheet {
             shapes: Vec::new(),
             hyperlinks: Vec::new(),
             comments: Vec::new(),
+            threaded_comments: Vec::new(),
             data_validations: Vec::new(),
             conditional_formats: Vec::new(),
+            conditional_format_extensions: Vec::new(),
             auto_filter: None,
             page_setup: PageSetup::default(),
             pane_state: None,
@@ -268,6 +272,10 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub description: Option<String>,
+    #[serde(default)]
+    pub media_path: Option<String>,
+    #[serde(default)]
+    pub data: Option<Vec<u8>>,
 }
 
 /// A shape in a sheet.
@@ -295,6 +303,31 @@ pub struct Comment {
     pub author: Option<String>,
 }
 
+/// A modern Excel comment, including replies within a thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadedComment {
+    pub id: String,
+    pub parent_id: Option<String>,
+    pub cell: String,
+    pub text: String,
+    pub person_id: String,
+    pub author: Option<String>,
+    pub created_at: Option<String>,
+    pub done: bool,
+    #[serde(default)]
+    pub mentions: Vec<ThreadedMention>,
+}
+
+/// A person mentioned at a position in a threaded comment's text.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadedMention {
+    pub id: String,
+    pub person_id: String,
+    pub person_name: Option<String>,
+    pub start_index: u32,
+    pub length: u32,
+}
+
 /// AutoFilter definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AutoFilter {
@@ -312,6 +345,7 @@ pub struct FilterColumn {
 pub enum FilterType {
     Value(String),
     TopN(u32),
+    /// Custom criterion; OOXML reads use the original filterColumn XML for complex rules.
     Custom(String),
     Dynamic(String),
 }
@@ -462,7 +496,10 @@ mod tests {
         let mut sheet = Sheet::new("Overwrite");
         sheet.set_cell(0, 0, Cell::string("old"));
         sheet.set_cell(0, 0, Cell::string("new"));
-        assert_eq!(sheet.get_cell(0, 0).unwrap().value.as_string().unwrap(), "new");
+        assert_eq!(
+            sheet.get_cell(0, 0).unwrap().value.as_string().unwrap(),
+            "new"
+        );
     }
 
     #[test]
@@ -470,7 +507,10 @@ mod tests {
         let mut sheet = Sheet::new("Clear");
         sheet.set_cell(0, 0, Cell::number(42.0));
         sheet.set_cell(0, 0, Cell::empty());
-        assert!(matches!(sheet.get_cell(0, 0).unwrap().value, CellValue::Empty));
+        assert!(matches!(
+            sheet.get_cell(0, 0).unwrap().value,
+            CellValue::Empty
+        ));
     }
 
     #[test]

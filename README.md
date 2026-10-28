@@ -11,7 +11,7 @@
 
 ### Scope
 
-- **Format interoperability** — Read and write `.xlsx`, `.xls`, `.xlsm`, `.ods`, `.csv`, `.tsv`, and related tabular formats
+- **Format interoperability** — Read `.xlsx`, `.xlsm`, `.xlsb`, `.xls`, `.ods`, `.csv`, and `.tsv`; write new `.xlsx`, `.csv`, `.tsv`, and `.json` files
 - **Pipeline-oriented I/O** — Table output for interactive use and JSON output for automation or downstream tooling
 - **Unicode and encoding handling** — Support for multilingual content with encoding detection and normalization utilities
 - **Formula processing** — Formula parsing, evaluation, and dependency analysis for spreadsheet expressions
@@ -22,16 +22,44 @@
 
 | Feature | Status | Details |
 |---------|--------|---------|
-| **Read** | Supported | Multi-sheet access, range selection, format detection |
-| **Write** | Supported | Append workflows, format conversion, style-aware export |
+| **Read** | Partial | Values, formulas, and selected workbook metadata; advanced Excel features are not fully modeled |
+| **Write** | Limited | New XLSX and single-sheet CSV/TSV export; existing Excel workbooks require package-preserving operations |
 | **Filter** | Supported | Predicate filters, column selection, regular expressions |
 | **Sort** | Supported | Multi-key ordering and stable sort behavior |
 | **Aggregate** | Supported | Summary statistics, grouped aggregation, pivot-style operations |
 | **Transform** | Supported | Projection, transpose, reshape, and column derivation |
 | **Merge** | Supported | Horizontal and vertical merge workflows with deduplication support |
 | **Search** | Supported | Full-text, regex, and fuzzy matching |
-| **Formula** | Supported | Parse, evaluate, and inspect formula dependencies |
-| **Styling** | Supported | Theme, font, color, and conditional-formatting operations |
+| **Formula** | Partial | Parse, evaluate, inspect dependencies, and edit ordinary formulas in XLSX/XLSM |
+| **Styling** | Limited | In-memory style operations; full Excel style roundtrips are not supported |
+
+---
+
+## Editing existing Excel workbooks
+
+XLSX/XLSM reads retain formula text and cached values, rich-text runs, common cell/row/column styles, custom number formats and raw number-format IDs, numeric date/time serials, named ranges with workbook or sheet scope, hidden state, and comments, external workbook link paths and sheet names, common data connection types and source details, the workbook date system, common worksheet data validations (including Office 2010 extension rules), worksheet AutoFilter ranges and criteria, conditional-format ranges and priorities (with simple color scales, data bars, and formula or cell-value rules using supported differential styles decoded, other rules retained as raw XML, and Office 2010 extension groups exposed separately with their raw XML), table names/ranges/columns, common PivotTable names, locations, worksheet sources and field layout, legacy cell comment text and authors, modern threaded comments with reply links, person names, and mention positions, embedded picture bytes and placement, common chart metadata, sheet protection permissions, print areas and repeat rows/columns, and selected sheet layout metadata. Value, Top N count, and dynamic filter criteria are decoded; complex criteria retain their original XML in `FilterType::Custom`. Advanced Excel features are still not fully represented by the in-memory model.
+
+`excli replace report.xlsx --find Old --replace New` edits plain string cells in an existing `.xlsx` or `.xlsm` package. Other workbook parts, including formulas, formatting, and macros, are retained; namespace-prefixed worksheet elements are preserved when a cell is replaced. Rich-text matches contained within individual runs preserve their run formatting, including common shared-string cells converted to inline rich text. Matches crossing run boundaries or using dependent namespaces are rejected without changing the file. Use `--dry-run` to count matching cells first.
+
+`excli sheet hide report.xlsx --sheet Archive` and `excli sheet unhide report.xlsx --sheet Archive` change sheet visibility without rebuilding the workbook. `excli formula set report.xlsx --sheet Sales --cell B2 --formula '=A1+1'` writes an ordinary formula while retaining the other package parts and requests recalculation when Excel opens the file. Formula and typed-value edits preserve worksheet element prefixes. Formula edits to shared or array formulas, rich-text cells, and cells with extension metadata are rejected. Digitally signed workbooks are rejected for editing.
+
+`excli sheet move report.xlsx --sheet Archive --index 0` reorders worksheet tabs while preserving worksheet files, formulas, and package relationships. Sheet-scoped names and workbook view indices are updated to follow their original sheets.
+
+`excli sheet add report.xlsx --name Archive` adds a blank sheet to an existing XLSX/XLSM package while retaining the original worksheet parts. Invalid or duplicate Excel sheet names are rejected.
+
+`excli sheet copy report.xlsx --source Sales --dest SalesCopy` copies a worksheet's XML inside an existing XLSX/XLSM package, retaining its cells, formulas, formatting, and hyperlinks. Explicit references to the source sheet in the copied worksheet and copied sheet-scoped names are changed to the new sheet name. Attached tables receive new package parts, names, and IDs; legacy notes and modern comment threads receive separate parts, with new thread and mention IDs. Worksheet drawings and common charts are copied into separate parts, chart references to the source sheet are updated, and embedded images continue to use the existing media bytes. Common PivotTables receive separate definitions and unique names while retaining their shared source cache. The command rejects unsupported drawing or PivotTable relationships, charts with dependent package relationships, table-name formulas requiring rewriting, or workbooks with VBA projects or calculation chains until those dependencies can be cloned safely.
+
+`excli sheet rename report.xlsx Data Sales` changes a sheet name without rebuilding the workbook. Common worksheet, defined-name, chart, table, and validation formula references are updated; formula string literals remain unchanged. Unresolved references cause the command to fail without changing the file.
+
+`excli sheet delete report.xlsx --sheet Archive` removes a worksheet and its exclusive package parts without rebuilding the remaining sheets. The command leaves the file unchanged if another part still references the sheet, if it is the last visible sheet, or if the workbook contains a VBA project or calculation chain.
+
+`excli write report.xlsx --append --sheet Sales --data '[[12.5,true,"new item"]]'` appends typed values to an existing XLSX/XLSM worksheet while retaining its other package parts. Writing to an existing Excel file without `--append` is rejected to prevent replacing the workbook. Edits to rich-text cells, formula groups, and merged cells outside the top-left anchor are rejected.
+
+For CSV text input, quoted commas and newlines are parsed correctly: `excli write report.xlsx --append --sheet Sales --data '"item, one",12.5'`.
+
+Other commands that rebuild an existing Excel workbook currently fail instead of silently dropping formulas, formatting, or workbook features. Rebuilding `.xlsm`, `.xls`, `.ods`, and other unsupported output formats also fails explicitly. CSV/TSV export requires one sheet; select a sheet during conversion, for example `excli convert report.xlsx report.csv --sheet Sales`.
+
+For an unchanged workbook in the same format, `excli convert report.xlsx backup.xlsx` copies the file byte-for-byte. The same applies to `.xlsm`, `.xlsb`, `.xls`, and `.ods`. This path requires no `--sheet` selection. For XLSX, `excli convert report.xlsx selected.xlsx --sheet Sales` extracts one worksheet through package edits, retaining that sheet's XML and related parts. Extraction fails without changing the output if a retained part still references a removed sheet.
 
 ---
 
@@ -124,10 +152,10 @@ excli transform data.xlsx --transpose
 
 ```bash
 # Excel to CSV
-excli read sales.xlsx | excli write output.csv
+excli convert sales.xlsx output.csv --sheet Sales
 
-# CSV to Excel with headers
-excli read data.csv --header | excli write result.xlsx
+# CSV to Excel
+excli convert data.csv result.xlsx
 
 # Excel to JSON
 excli read data.xlsx --json > data.json
@@ -225,7 +253,7 @@ excli sheet unhide <file> --sheet NAME
 
 ```bash
 excli formula read <file>              # Read formulas
-excli formula set <file> --formula EXPR
+excli formula set <file> --sheet NAME --cell B2 --formula EXPR
 excli formula deps <file> --cell A1    # Show dependencies
 excli formula dependents <file> --cell A1
 excli formula errors <file>            # List formula errors
@@ -290,9 +318,9 @@ excli aggregate data.xlsx --group-by Category --sum Sales --json | \
 
 | Format | Extension | Status | Notes |
 |--------|-----------|--------|-------|
-| Excel | `.xlsx`, `.xlsm` | Full | Office Open XML |
-| Excel Binary | `.xls`, `.xlsb` | Full | Legacy formats |
-| OpenDocument | `.ods` | Full | LibreOffice compatible |
+| Excel | `.xlsx`, `.xlsm` | Partial | Values, formulas, names, visibility, and selected layout metadata; advanced features are not fully modeled |
+| Excel Binary | `.xls`, `.xlsb` | Partial | Values and formulas through calamine; workbook features are not fully modeled |
+| OpenDocument | `.ods` | Partial | Values and formulas through calamine |
 | CSV/TSV | `.csv`, `.tsv` | Full | Auto-delimiter detection |
 | JSON | `.json` | Full | Array/object format |
 | Parquet | `.parquet` | Partial | Column-oriented |
@@ -302,10 +330,10 @@ excli aggregate data.xlsx --group-by Category --sum Sales --json | \
 
 | Format | Status | Notes |
 |--------|--------|-------|
-| Excel `.xlsx` | Full | Style/formula preservation |
-| CSV/TSV | Full | Encoding detection |
-| OpenDocument `.ods` | Full | Format preservation |
-| JSON | Full | Schema export |
+| Excel `.xlsx` | Limited | New workbook export; targeted edits preserve existing packages |
+| CSV/TSV | Supported | Single-sheet export with quoting |
+| OpenDocument `.ods` | Unsupported | Existing files cannot be written |
+| JSON | Supported | Schema export |
 | Parquet | Partial | Experimental |
 
 ---

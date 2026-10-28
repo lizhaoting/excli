@@ -6,12 +6,16 @@ use excli_core::error::{ErrorCode, ExcliError, ExcliResult};
 use excli_core::sheet::SheetState;
 use excli_core::Workbook;
 use excli_ops::aggregate::{aggregate, AggregateOp, Aggregation};
-use excli_ops::clean::{clean_blanks, clean_case, clean_trim, remove_duplicates, BlankFillStrategy, CaseType};
+use excli_ops::clean::{
+    clean_blanks, clean_case, clean_trim, remove_duplicates, BlankFillStrategy, CaseType,
+};
 use excli_ops::filter::{filter_rows, filter_unique, FilterCondition, FilterOperator};
 use excli_ops::merge::{merge_workbooks, JoinType};
 use excli_ops::search::{replace_cells, search_cells, SearchOptions};
 use excli_ops::sort::{sort_rows, SortOrder, SortSpec};
-use excli_ops::transform::{concat_workbooks, split_by_column, split_by_rows, transpose, ConcatAxis};
+use excli_ops::transform::{
+    concat_workbooks, split_by_column, split_by_rows, transpose, ConcatAxis,
+};
 
 use crate::cli::{Cli, Commands, FormulaCmd, SheetCmd};
 
@@ -46,8 +50,7 @@ fn print_sheet_json(sheet: &excli_core::Sheet) {
                 .iter()
                 .map(|c| match &c.value {
                     CellValue::Number(n) => serde_json::Value::Number(
-                        serde_json::Number::from_f64(*n)
-                            .unwrap_or(serde_json::Number::from(0)),
+                        serde_json::Number::from_f64(*n).unwrap_or(serde_json::Number::from(0)),
                     ),
                     CellValue::Boolean(b) => serde_json::Value::Bool(*b),
                     CellValue::Empty => serde_json::Value::Null,
@@ -56,7 +59,10 @@ fn print_sheet_json(sheet: &excli_core::Sheet) {
                 .collect()
         })
         .collect();
-    println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&rows).unwrap_or_default()
+    );
 }
 
 /// Simple pseudo-random number generator (LCG) for sampling.
@@ -179,7 +185,12 @@ pub fn dispatch(cli: Cli) -> ExcliResult<()> {
             context,
             file,
             ..
-        } => cmd_calc(evaluate.as_deref(), context.as_deref(), file.as_deref(), json),
+        } => cmd_calc(
+            evaluate.as_deref(),
+            context.as_deref(),
+            file.as_deref(),
+            json,
+        ),
 
         Commands::Filter {
             file,
@@ -290,7 +301,15 @@ pub fn dispatch(cli: Cli) -> ExcliResult<()> {
             case_sensitive,
             whole_word,
             ..
-        } => cmd_search(&file, &pattern, regex, case_sensitive, whole_word, json, quiet),
+        } => cmd_search(
+            &file,
+            &pattern,
+            regex,
+            case_sensitive,
+            whole_word,
+            json,
+            quiet,
+        ),
 
         Commands::Replace {
             file,
@@ -447,7 +466,10 @@ fn cmd_read(
                         .collect()
                 })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&data).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&data).unwrap_or_default()
+            );
         } else {
             for (r_off, row) in rows_iter.enumerate() {
                 let actual_row = (skip + r_off) as u32;
@@ -474,6 +496,10 @@ fn cmd_read(
 
 // ─── Write ─────────────────────────────────────────────────────────────────────
 
+fn parse_inline_csv(data: &str) -> ExcliResult<Vec<Vec<Cell>>> {
+    excli_io::csv_io::parse_inline_csv(data, b',')
+}
+
 fn cmd_write(
     output: &str,
     data: Option<&str>,
@@ -482,19 +508,98 @@ fn cmd_write(
     append: bool,
     quiet: bool,
 ) -> ExcliResult<()> {
-    let (col_offset, row_offset) = start_cell
-        .and_then(parse_cell_ref)
-        .unwrap_or((0, 0));
+    if !append
+        && Path::new(output).exists()
+        && matches!(
+            excli_io::format_detect::detect_format(Path::new(output))?,
+            excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+        )
+    {
+        return Err(ExcliError::new(
+            ErrorCode::NotImplemented,
+            "Refusing to rebuild an existing Excel workbook; use --append for package-preserving value edits",
+        ));
+    }
+    let (col_offset, row_offset) = match start_cell {
+        Some(reference) => parse_cell_ref(reference).ok_or_else(|| {
+            ExcliError::new(
+                ErrorCode::RangeInvalid,
+                format!("Invalid start cell: {reference}"),
+            )
+        })?,
+        None => (0, 0),
+    };
+
+    let data_str = data
+        .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No data provided (use --data)"))?;
+
+    if append
+        && Path::new(output).exists()
+        && matches!(
+            excli_io::format_detect::detect_format(Path::new(output))?,
+            excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+        )
+    {
+        let (target_name, base_row) =
+            excli_io::ooxml_value_edit::append_position(Path::new(output), sheet_name)?;
+        let mut edits = Vec::new();
+        let mut add = |column: usize, row: usize, value: CellValue| -> ExcliResult<()> {
+            let column = col_offset
+                .checked_add(u32::try_from(column).map_err(|_| {
+                    ExcliError::new(ErrorCode::RangeInvalid, "Column exceeds Excel limits")
+                })?)
+                .ok_or_else(|| {
+                    ExcliError::new(ErrorCode::RangeInvalid, "Column exceeds Excel limits")
+                })?;
+            let row = base_row
+                .checked_add(u32::try_from(row).map_err(|_| {
+                    ExcliError::new(ErrorCode::RangeInvalid, "Row exceeds Excel limits")
+                })?)
+                .ok_or_else(|| {
+                    ExcliError::new(ErrorCode::RangeInvalid, "Row exceeds Excel limits")
+                })?;
+            edits.push(((column, row), value));
+            Ok(())
+        };
+        if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(data_str) {
+            if let Some(rows) = json_val.as_array() {
+                for (row, item) in rows.iter().enumerate() {
+                    if let Some(cells) = item.as_array() {
+                        for (column, value) in cells.iter().enumerate() {
+                            add(column, row, json_value_to_cell(value).value)?;
+                        }
+                    } else if let Some(object) = item.as_object() {
+                        for (column, (_, value)) in object.iter().enumerate() {
+                            add(column, row, json_value_to_cell(value).value)?;
+                        }
+                    }
+                }
+            }
+        } else {
+            for (row, cells) in parse_inline_csv(data_str)?.iter().enumerate() {
+                for (column, cell) in cells.iter().enumerate() {
+                    add(column, row, cell.value.clone())?;
+                }
+            }
+        }
+        if edits.is_empty() {
+            return Err(ExcliError::new(
+                ErrorCode::GeneralError,
+                "No cells to write",
+            ));
+        }
+        excli_io::ooxml_value_edit::set_values(Path::new(output), Some(&target_name), &edits)?;
+        if !quiet {
+            println!("Written to {}", output);
+        }
+        return Ok(());
+    }
 
     let mut wb = if append && Path::new(output).exists() {
         excli_io::reader::read_workbook(Path::new(output))?
     } else {
         Workbook::new()
     };
-
-    let data_str = data.ok_or_else(|| {
-        ExcliError::new(ErrorCode::GeneralError, "No data provided (use --data)")
-    })?;
 
     let target_name = sheet_name.unwrap_or("Sheet1");
     if wb.sheet_by_name(target_name).is_none() {
@@ -516,25 +621,27 @@ fn cmd_write(
                 let row_pos = base_row + row_idx as u32;
                 if let Some(cells) = row_val.as_array() {
                     for (col_idx, val) in cells.iter().enumerate() {
-                        sheet.set_cell(col_offset + col_idx as u32, row_pos, json_value_to_cell(val));
+                        sheet.set_cell(
+                            col_offset + col_idx as u32,
+                            row_pos,
+                            json_value_to_cell(val),
+                        );
                     }
                 } else if let Some(obj) = row_val.as_object() {
                     for (col_idx, (_, val)) in obj.iter().enumerate() {
-                        sheet.set_cell(col_offset + col_idx as u32, row_pos, json_value_to_cell(val));
+                        sheet.set_cell(
+                            col_offset + col_idx as u32,
+                            row_pos,
+                            json_value_to_cell(val),
+                        );
                     }
                 }
             }
         }
     } else {
-        for (row_idx, line) in data_str.lines().enumerate() {
+        for (row_idx, cells) in parse_inline_csv(data_str)?.into_iter().enumerate() {
             let row_pos = base_row + row_idx as u32;
-            for (col_idx, val) in line.split(',').enumerate() {
-                let trimmed = val.trim();
-                let cell = if let Ok(n) = trimmed.parse::<f64>() {
-                    Cell::number(n)
-                } else {
-                    Cell::string(trimmed)
-                };
+            for (col_idx, cell) in cells.into_iter().enumerate() {
                 sheet.set_cell(col_offset + col_idx as u32, row_pos, cell);
             }
         }
@@ -578,18 +685,34 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
                         })
                     })
                     .collect();
-                println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&info).unwrap_or_default()
+                );
             } else {
                 for (i, s) in wb.sheets.iter().enumerate() {
-                    let hidden = if s.state != SheetState::Visible { " [hidden]" } else { "" };
-                    println!("  {}. {}{}  ({} rows x {} cols)", i + 1, s.name, hidden, s.row_count(), s.col_count());
+                    let hidden = if s.state != SheetState::Visible {
+                        " [hidden]"
+                    } else {
+                        ""
+                    };
+                    println!(
+                        "  {}. {}{}  ({} rows x {} cols)",
+                        i + 1,
+                        s.name,
+                        hidden,
+                        s.row_count(),
+                        s.col_count()
+                    );
                 }
             }
         }
 
         SheetCmd::Info { file, sheet } => {
             let wb = excli_io::reader::read_workbook(Path::new(&file))?;
-            let s = wb.sheet_by_name(&sheet).ok_or_else(|| ExcliError::sheet_not_found(&sheet))?;
+            let s = wb
+                .sheet_by_name(&sheet)
+                .ok_or_else(|| ExcliError::sheet_not_found(&sheet))?;
             let st = s.stats();
             if json {
                 println!("{}", serde_json::to_string_pretty(&st).unwrap_or_default());
@@ -603,6 +726,14 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
         }
 
         SheetCmd::Rename { file, old, new } => {
+            if matches!(
+                excli_io::format_detect::detect_format(Path::new(&file))?,
+                excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+            ) {
+                excli_io::ooxml_sheet_rename::rename_sheet(Path::new(&file), &old, &new)?;
+                println!("Renamed '{}' -> '{}'", old, new);
+                return Ok(());
+            }
             let mut wb = excli_io::reader::read_workbook(Path::new(&file))?;
             wb.rename_sheet(&old, &new)?;
             excli_io::writer::write_workbook(Path::new(&file), &wb)?;
@@ -610,6 +741,14 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
         }
 
         SheetCmd::Add { file, name } => {
+            if matches!(
+                excli_io::format_detect::detect_format(Path::new(&file))?,
+                excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+            ) {
+                excli_io::ooxml_sheet_add::add_sheet(Path::new(&file), &name)?;
+                println!("Added sheet '{}'", name);
+                return Ok(());
+            }
             let mut wb = excli_io::reader::read_workbook(Path::new(&file))?;
             wb.add_sheet(&name);
             excli_io::writer::write_workbook(Path::new(&file), &wb)?;
@@ -617,6 +756,14 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
         }
 
         SheetCmd::Delete { file, sheet } => {
+            if matches!(
+                excli_io::format_detect::detect_format(Path::new(&file))?,
+                excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+            ) {
+                excli_io::ooxml_sheet_delete::delete_sheet(Path::new(&file), &sheet)?;
+                println!("Deleted sheet '{}'", sheet);
+                return Ok(());
+            }
             let mut wb = excli_io::reader::read_workbook(Path::new(&file))?;
             wb.remove_sheet(&sheet)?;
             excli_io::writer::write_workbook(Path::new(&file), &wb)?;
@@ -624,6 +771,14 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
         }
 
         SheetCmd::Copy { file, source, dest } => {
+            if matches!(
+                excli_io::format_detect::detect_format(Path::new(&file))?,
+                excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+            ) {
+                excli_io::ooxml_sheet_add::copy_sheet(Path::new(&file), &source, &dest)?;
+                println!("Copied '{}' -> '{}'", source, dest);
+                return Ok(());
+            }
             let mut wb = excli_io::reader::read_workbook(Path::new(&file))?;
             let mut new_sheet = wb
                 .sheet_by_name(&source)
@@ -636,8 +791,19 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
         }
 
         SheetCmd::Move { file, sheet, index } => {
+            if matches!(
+                excli_io::format_detect::detect_format(Path::new(&file))?,
+                excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+            ) {
+                excli_io::ooxml_edit::move_sheet(Path::new(&file), &sheet, index)?;
+                println!("Moved '{}' to index {}", sheet, index);
+                return Ok(());
+            }
             let mut wb = excli_io::reader::read_workbook(Path::new(&file))?;
-            let pos = wb.sheets.iter().position(|s| s.name == sheet)
+            let pos = wb
+                .sheets
+                .iter()
+                .position(|s| s.name == sheet)
                 .ok_or_else(|| ExcliError::sheet_not_found(&sheet))?;
             let s = wb.sheets.remove(pos);
             let insert_at = index.min(wb.sheets.len());
@@ -647,6 +813,18 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
         }
 
         SheetCmd::Hide { file, sheet } => {
+            if matches!(
+                excli_io::format_detect::detect_format(Path::new(&file))?,
+                excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+            ) {
+                excli_io::ooxml_edit::set_sheet_state(
+                    Path::new(&file),
+                    &sheet,
+                    SheetState::Hidden,
+                )?;
+                println!("Hidden sheet '{}'", sheet);
+                return Ok(());
+            }
             let mut wb = excli_io::reader::read_workbook(Path::new(&file))?;
             wb.sheet_by_name_mut(&sheet)
                 .ok_or_else(|| ExcliError::sheet_not_found(&sheet))?
@@ -656,6 +834,18 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
         }
 
         SheetCmd::Unhide { file, sheet } => {
+            if matches!(
+                excli_io::format_detect::detect_format(Path::new(&file))?,
+                excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+            ) {
+                excli_io::ooxml_edit::set_sheet_state(
+                    Path::new(&file),
+                    &sheet,
+                    SheetState::Visible,
+                )?;
+                println!("Unhidden sheet '{}'", sheet);
+                return Ok(());
+            }
             let mut wb = excli_io::reader::read_workbook(Path::new(&file))?;
             wb.sheet_by_name_mut(&sheet)
                 .ok_or_else(|| ExcliError::sheet_not_found(&sheet))?
@@ -671,14 +861,22 @@ fn cmd_sheet(action: SheetCmd, json: bool) -> ExcliResult<()> {
 
 fn cmd_formula(action: FormulaCmd, json: bool) -> ExcliResult<()> {
     match action {
-        FormulaCmd::Read { file, sheet, evaluate, both, .. } => {
+        FormulaCmd::Read {
+            file,
+            sheet,
+            evaluate,
+            both,
+            ..
+        } => {
             let wb = excli_io::reader::read_workbook(Path::new(&file))?;
             let registry = excli_formula::functions::FunctionRegistry::new();
             let mut results: Vec<serde_json::Value> = Vec::new();
 
             for s in &wb.sheets {
                 if let Some(ref name) = sheet {
-                    if &s.name != name { continue; }
+                    if &s.name != name {
+                        continue;
+                    }
                 }
                 for (row_idx, row) in s.rows.iter().enumerate() {
                     for (col_idx, cell) in row.cells.iter().enumerate() {
@@ -693,7 +891,9 @@ fn cmd_formula(action: FormulaCmd, json: bool) -> ExcliResult<()> {
                                     .parse()
                                     .ok()
                                     .and_then(|ast| {
-                                        let mut ctx = excli_formula::evaluator::EvalContext::new(&wb, &registry);
+                                        let mut ctx = excli_formula::evaluator::EvalContext::new(
+                                            &wb, &registry,
+                                        );
                                         ctx.current_sheet = Some(s.name.clone());
                                         excli_formula::evaluator::Evaluator::new()
                                             .evaluate(&ast.root, &mut ctx)
@@ -711,9 +911,20 @@ fn cmd_formula(action: FormulaCmd, json: bool) -> ExcliResult<()> {
                                 }
                                 results.push(obj);
                             } else if both {
-                                println!("{}!{}: {} = {}", s.name, cell_ref, f.raw, evaluated_val.as_deref().unwrap_or("?"));
+                                println!(
+                                    "{}!{}: {} = {}",
+                                    s.name,
+                                    cell_ref,
+                                    f.raw,
+                                    evaluated_val.as_deref().unwrap_or("?")
+                                );
                             } else if evaluate {
-                                println!("{}!{}: {}", s.name, cell_ref, evaluated_val.as_deref().unwrap_or("#ERROR"));
+                                println!(
+                                    "{}!{}: {}",
+                                    s.name,
+                                    cell_ref,
+                                    evaluated_val.as_deref().unwrap_or("#ERROR")
+                                );
                             } else {
                                 println!("{}!{}: {}", s.name, cell_ref, f.raw);
                             }
@@ -722,37 +933,62 @@ fn cmd_formula(action: FormulaCmd, json: bool) -> ExcliResult<()> {
                 }
             }
             if json {
-                println!("{}", serde_json::to_string_pretty(&results).unwrap_or_default());
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&results).unwrap_or_default()
+                );
             }
         }
 
-        FormulaCmd::Set { file, cell, range, formula } => {
-            let mut wb = excli_io::reader::read_workbook(Path::new(&file))?;
-            let sheet = wb.sheets.first_mut()
-                .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No sheets"))?;
-
-            if let Some(ref cell_str) = cell {
-                if let Some((col, row)) = parse_cell_ref(cell_str) {
-                    let mut c = sheet.get_cell(col, row).cloned().unwrap_or_else(Cell::empty);
-                    c.formula = Some(excli_core::formula::Formula::new(formula.clone()));
-                    sheet.set_cell(col, row, c);
-                } else {
-                    return Err(ExcliError::new(ErrorCode::RangeInvalid, format!("Invalid cell reference: {}", cell_str)));
-                }
+        FormulaCmd::Set {
+            file,
+            sheet,
+            cell,
+            range,
+            formula,
+        } => {
+            let cells = if let Some(ref cell_str) = cell {
+                vec![parse_cell_ref(cell_str).ok_or_else(|| {
+                    ExcliError::new(
+                        ErrorCode::RangeInvalid,
+                        format!("Invalid cell reference: {cell_str}"),
+                    )
+                })?]
             } else if let Some(ref range_str) = range {
-                if let Some(((sc, sr), (ec, er))) = parse_range(range_str) {
-                    for row in sr..=er {
-                        for col in sc..=ec {
-                            let mut c = sheet.get_cell(col, row).cloned().unwrap_or_else(Cell::empty);
-                            c.formula = Some(excli_core::formula::Formula::new(formula.clone()));
-                            sheet.set_cell(col, row, c);
-                        }
+                let ((sc, sr), (ec, er)) = parse_range(range_str).ok_or_else(|| {
+                    ExcliError::new(
+                        ErrorCode::RangeInvalid,
+                        format!("Invalid range: {range_str}"),
+                    )
+                })?;
+                if ec < sc
+                    || er < sr
+                    || (ec as u64 - sc as u64 + 1) * (er as u64 - sr as u64 + 1) > 1_048_576
+                {
+                    return Err(ExcliError::new(
+                        ErrorCode::RangeInvalid,
+                        "Invalid or excessively large formula range",
+                    ));
+                }
+                let mut cells = Vec::new();
+                for row in sr..=er {
+                    for col in sc..=ec {
+                        cells.push((col, row));
                     }
                 }
+                cells
             } else {
-                return Err(ExcliError::new(ErrorCode::GeneralError, "Specify --cell or --range"));
-            }
-            excli_io::writer::write_workbook(Path::new(&file), &wb)?;
+                return Err(ExcliError::new(
+                    ErrorCode::GeneralError,
+                    "Specify --cell or --range",
+                ));
+            };
+            excli_io::ooxml_formula_edit::set_formulas(
+                Path::new(&file),
+                sheet.as_deref(),
+                &cells,
+                &formula,
+            )?;
             println!("Formula set: {}", formula);
         }
 
@@ -782,26 +1018,37 @@ fn cmd_formula(action: FormulaCmd, json: bool) -> ExcliResult<()> {
                             _ => false,
                         };
                         let evaluated_error = if let Some(ref f) = cell.formula {
-                            excli_formula::parser::Parser::new(&f.raw).parse().ok().and_then(|ast| {
-                                let mut ctx = excli_formula::evaluator::EvalContext::new(&wb, &registry);
-                                ctx.current_sheet = Some(sheet.name.clone());
-                                excli_formula::evaluator::Evaluator::new().evaluate(&ast.root, &mut ctx).ok()
-                            }).map_or(false, |v| matches!(v, CellValue::Error(_)))
+                            excli_formula::parser::Parser::new(&f.raw)
+                                .parse()
+                                .ok()
+                                .and_then(|ast| {
+                                    let mut ctx =
+                                        excli_formula::evaluator::EvalContext::new(&wb, &registry);
+                                    ctx.current_sheet = Some(sheet.name.clone());
+                                    excli_formula::evaluator::Evaluator::new()
+                                        .evaluate(&ast.root, &mut ctx)
+                                        .ok()
+                                })
+                                .map_or(false, |v| matches!(v, CellValue::Error(_)))
                         } else {
                             false
                         };
 
                         if has_error || evaluated_error {
                             found = true;
-                            let cref = format!("{}{}",
+                            let cref = format!(
+                                "{}{}",
                                 excli_core::reference::column_index_to_name(col_idx as u32),
-                                row_idx + 1);
+                                row_idx + 1
+                            );
                             println!("{}!{}: {}", sheet.name, cref, cell.value);
                         }
                     }
                 }
             }
-            if !found { println!("No formula errors found."); }
+            if !found {
+                println!("No formula errors found.");
+            }
         }
 
         FormulaCmd::Circular { file } => {
@@ -812,7 +1059,9 @@ fn cmd_formula(action: FormulaCmd, json: bool) -> ExcliResult<()> {
                 println!("No circular references detected.");
             } else {
                 println!("Circular references:");
-                for c in &cycles { println!("  {}", c.join(" -> ")); }
+                for c in &cycles {
+                    println!("  {}", c.join(" -> "));
+                }
             }
         }
     }
@@ -895,10 +1144,15 @@ fn cmd_calc(
                 for (row_idx, row) in sheet.rows.iter().enumerate() {
                     for (col_idx, cell) in row.cells.iter().enumerate() {
                         if let Some(ref formula) = cell.formula {
-                            if let Ok(ast) = excli_formula::parser::Parser::new(&formula.raw).parse() {
-                                let mut ctx = excli_formula::evaluator::EvalContext::new(&wb, &registry);
+                            if let Ok(ast) =
+                                excli_formula::parser::Parser::new(&formula.raw).parse()
+                            {
+                                let mut ctx =
+                                    excli_formula::evaluator::EvalContext::new(&wb, &registry);
                                 ctx.current_sheet = Some(sheet_name.clone());
-                                if let Ok(val) = excli_formula::evaluator::Evaluator::new().evaluate(&ast.root, &mut ctx) {
+                                if let Ok(val) = excli_formula::evaluator::Evaluator::new()
+                                    .evaluate(&ast.root, &mut ctx)
+                                {
                                     updates.push((col_idx as u32, row_idx as u32, val));
                                     calc_count += 1;
                                 }
@@ -919,7 +1173,10 @@ fn cmd_calc(
         return Ok(());
     }
 
-    Err(ExcliError::new(ErrorCode::GeneralError, "Specify --evaluate <expr> or --file <path>"))
+    Err(ExcliError::new(
+        ErrorCode::GeneralError,
+        "Specify --evaluate <expr> or --file <path>",
+    ))
 }
 
 fn eval_formula_in_wb(
@@ -929,7 +1186,9 @@ fn eval_formula_in_wb(
     json: bool,
 ) -> ExcliResult<()> {
     let mut parser = excli_formula::parser::Parser::new(expr);
-    let ast = parser.parse().map_err(|e| ExcliError::new(ErrorCode::FormulaParseError, e.to_string()))?;
+    let ast = parser
+        .parse()
+        .map_err(|e| ExcliError::new(ErrorCode::FormulaParseError, e.to_string()))?;
     let mut ctx = excli_formula::evaluator::EvalContext::new(wb, registry);
     ctx.current_sheet = wb.sheets.first().map(|s| s.name.clone());
     let result = excli_formula::evaluator::Evaluator::new()
@@ -967,7 +1226,8 @@ fn cmd_filter(
     _quiet: bool,
 ) -> ExcliResult<()> {
     let wb = excli_io::reader::read_workbook(Path::new(file))?;
-    let sheet = wb.sheet_by_index(0)
+    let sheet = wb
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No sheets in workbook"))?;
 
     let result = if unique {
@@ -977,18 +1237,31 @@ fn cmd_filter(
         let mut conditions: Vec<FilterCondition> = Vec::new();
 
         if let Some(v) = gt {
-            conditions.push(FilterCondition::new(col, FilterOperator::Gt, Some(v.to_string())));
+            conditions.push(FilterCondition::new(
+                col,
+                FilterOperator::Gt,
+                Some(v.to_string()),
+            ));
         }
         if let Some(v) = lt {
-            conditions.push(FilterCondition::new(col, FilterOperator::Lt, Some(v.to_string())));
+            conditions.push(FilterCondition::new(
+                col,
+                FilterOperator::Lt,
+                Some(v.to_string()),
+            ));
         }
         if let Some(v) = contains {
-            conditions.push(FilterCondition::new(col, FilterOperator::Contains, Some(v.to_string())));
+            conditions.push(FilterCondition::new(
+                col,
+                FilterOperator::Contains,
+                Some(v.to_string()),
+            ));
         }
         if let Some(v) = between {
             let parts: Vec<&str> = v.splitn(2, ',').collect();
             if parts.len() == 2 {
-                let mut cond = FilterCondition::new(col, FilterOperator::Between, Some(parts[0].to_string()));
+                let mut cond =
+                    FilterCondition::new(col, FilterOperator::Between, Some(parts[0].to_string()));
                 cond.value2 = Some(parts[1].to_string());
                 conditions.push(cond);
             }
@@ -1003,7 +1276,11 @@ fn cmd_filter(
             conditions.push(FilterCondition::new(col, FilterOperator::IsNull, None));
         }
         if let Some(v) = regex {
-            conditions.push(FilterCondition::new(col, FilterOperator::Regex, Some(v.to_string())));
+            conditions.push(FilterCondition::new(
+                col,
+                FilterOperator::Regex,
+                Some(v.to_string()),
+            ));
         }
 
         if conditions.is_empty() {
@@ -1013,7 +1290,11 @@ fn cmd_filter(
         }
     };
 
-    if json { print_sheet_json(&result); } else { print_sheet_csv(&result); }
+    if json {
+        print_sheet_json(&result);
+    } else {
+        print_sheet_csv(&result);
+    }
     Ok(())
 }
 
@@ -1030,14 +1311,21 @@ fn cmd_sort(
     _quiet: bool,
 ) -> ExcliResult<()> {
     let wb = excli_io::reader::read_workbook(Path::new(file))?;
-    let sheet = wb.sheet_by_index(0)
+    let sheet = wb
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No sheets in workbook"))?;
 
     let _ = asc;
-    let order = if desc { SortOrder::Desc } else { SortOrder::Asc };
+    let order = if desc {
+        SortOrder::Desc
+    } else {
+        SortOrder::Asc
+    };
 
     let specs: Vec<SortSpec> = if let Some(cols) = columns {
-        cols.split(',').map(|c| SortSpec::new(c.trim(), order)).collect()
+        cols.split(',')
+            .map(|c| SortSpec::new(c.trim(), order))
+            .collect()
     } else {
         let col = column.unwrap_or("A");
         let mut spec = SortSpec::new(col, order);
@@ -1048,7 +1336,11 @@ fn cmd_sort(
     };
 
     let result = sort_rows(sheet, &specs);
-    if json { print_sheet_json(&result); } else { print_sheet_csv(&result); }
+    if json {
+        print_sheet_json(&result);
+    } else {
+        print_sheet_csv(&result);
+    }
     Ok(())
 }
 
@@ -1064,7 +1356,8 @@ fn cmd_agg(
     _quiet: bool,
 ) -> ExcliResult<()> {
     let wb = excli_io::reader::read_workbook(Path::new(file))?;
-    let sheet = wb.sheet_by_index(0)
+    let sheet = wb
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No sheets in workbook"))?;
 
     let group_cols: Vec<String> = group_by
@@ -1073,10 +1366,14 @@ fn cmd_agg(
 
     let mut aggs: Vec<Aggregation> = Vec::new();
     if let Some(col) = sum {
-        for c in col.split(',') { aggs.push(Aggregation::new(c.trim(), AggregateOp::Sum)); }
+        for c in col.split(',') {
+            aggs.push(Aggregation::new(c.trim(), AggregateOp::Sum));
+        }
     }
     if let Some(col) = avg {
-        for c in col.split(',') { aggs.push(Aggregation::new(c.trim(), AggregateOp::Avg)); }
+        for c in col.split(',') {
+            aggs.push(Aggregation::new(c.trim(), AggregateOp::Avg));
+        }
     }
     if count {
         let fc = group_cols.first().map(|s| s.as_str()).unwrap_or("A");
@@ -1087,7 +1384,11 @@ fn cmd_agg(
     }
 
     let result = aggregate(sheet, &group_cols, &aggs);
-    if json { print_sheet_json(&result); } else { print_sheet_csv(&result); }
+    if json {
+        print_sheet_json(&result);
+    } else {
+        print_sheet_csv(&result);
+    }
     Ok(())
 }
 
@@ -1122,9 +1423,14 @@ fn cmd_merge(
     let key_r = right_on.or(on).unwrap_or("A");
 
     let result = merge_workbooks(&wb1, &wb2, key_l, key_r, join_type);
-    let sheet = result.sheet_by_index(0)
+    let sheet = result
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No result sheet"))?;
-    if json { print_sheet_json(sheet); } else { print_sheet_csv(sheet); }
+    if json {
+        print_sheet_json(sheet);
+    } else {
+        print_sheet_csv(sheet);
+    }
     Ok(())
 }
 
@@ -1132,7 +1438,10 @@ fn cmd_merge(
 
 fn cmd_concat(files: &[String], axis: &str, json: bool, _quiet: bool) -> ExcliResult<()> {
     if files.is_empty() {
-        return Err(ExcliError::new(ErrorCode::GeneralError, "No files specified"));
+        return Err(ExcliError::new(
+            ErrorCode::GeneralError,
+            "No files specified",
+        ));
     }
     let workbooks: Vec<Workbook> = files
         .iter()
@@ -1144,9 +1453,14 @@ fn cmd_concat(files: &[String], axis: &str, json: bool, _quiet: bool) -> ExcliRe
         _ => ConcatAxis::Rows,
     };
     let result = concat_workbooks(&refs, concat_axis);
-    let sheet = result.sheet_by_index(0)
+    let sheet = result
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No result sheet"))?;
-    if json { print_sheet_json(sheet); } else { print_sheet_csv(sheet); }
+    if json {
+        print_sheet_json(sheet);
+    } else {
+        print_sheet_csv(sheet);
+    }
     Ok(())
 }
 
@@ -1154,7 +1468,8 @@ fn cmd_concat(files: &[String], axis: &str, json: bool, _quiet: bool) -> ExcliRe
 
 fn cmd_transpose(file: &str, output: Option<&str>, json: bool, quiet: bool) -> ExcliResult<()> {
     let wb = excli_io::reader::read_workbook(Path::new(file))?;
-    let sheet = wb.sheet_by_index(0)
+    let sheet = wb
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No sheets in workbook"))?;
     let transposed = transpose(sheet);
 
@@ -1162,9 +1477,15 @@ fn cmd_transpose(file: &str, output: Option<&str>, json: bool, quiet: bool) -> E
         let mut out_wb = Workbook::new();
         out_wb.sheets.push(transposed);
         excli_io::writer::write_workbook(Path::new(out_path), &out_wb)?;
-        if !quiet { println!("Transposed to {}", out_path); }
+        if !quiet {
+            println!("Transposed to {}", out_path);
+        }
     } else {
-        if json { print_sheet_json(&transposed); } else { print_sheet_csv(&transposed); }
+        if json {
+            print_sheet_json(&transposed);
+        } else {
+            print_sheet_csv(&transposed);
+        }
     }
     Ok(())
 }
@@ -1179,27 +1500,40 @@ fn cmd_split(
     quiet: bool,
 ) -> ExcliResult<()> {
     let wb = excli_io::reader::read_workbook(Path::new(file))?;
-    let sheet = wb.sheet_by_index(0)
+    let sheet = wb
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No sheets in workbook"))?;
 
     let out_dir = output_dir.unwrap_or(".");
     std::fs::create_dir_all(out_dir)?;
     let out_path = Path::new(out_dir);
-    let stem = Path::new(file).file_stem().and_then(|s| s.to_str()).unwrap_or("split");
+    let stem = Path::new(file)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("split");
 
     if let Some(col) = by {
         let groups = split_by_column(sheet, col, out_path);
         let count = groups.len();
         for (key, group_sheet) in groups {
-            let safe_key: String = key.chars()
-                .map(|c| if c.is_alphanumeric() || c == '-' { c } else { '_' })
+            let safe_key: String = key
+                .chars()
+                .map(|c| {
+                    if c.is_alphanumeric() || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
                 .collect();
             let out_file = out_path.join(format!("{}_{}.csv", stem, safe_key));
             let mut group_wb = Workbook::new();
             group_wb.sheets.push(group_sheet);
             excli_io::writer::write_workbook(&out_file, &group_wb)?;
         }
-        if !quiet { println!("Split {} groups into {}", count, out_dir); }
+        if !quiet {
+            println!("Split {} groups into {}", count, out_dir);
+        }
     } else if let Some(chunk_size) = rows {
         let chunks = split_by_rows(sheet, chunk_size);
         for (i, chunk) in chunks.iter().enumerate() {
@@ -1208,9 +1542,14 @@ fn cmd_split(
             chunk_wb.sheets.push(chunk.clone());
             excli_io::writer::write_workbook(&out_file, &chunk_wb)?;
         }
-        if !quiet { println!("Split into {} parts in {}", chunks.len(), out_dir); }
+        if !quiet {
+            println!("Split into {} parts in {}", chunks.len(), out_dir);
+        }
     } else {
-        return Err(ExcliError::new(ErrorCode::GeneralError, "Specify --by <column> or --rows <n>"));
+        return Err(ExcliError::new(
+            ErrorCode::GeneralError,
+            "Specify --by <column> or --rows <n>",
+        ));
     }
     Ok(())
 }
@@ -1226,7 +1565,8 @@ fn cmd_sample(
     _quiet: bool,
 ) -> ExcliResult<()> {
     let wb = excli_io::reader::read_workbook(Path::new(file))?;
-    let sheet = wb.sheet_by_index(0)
+    let sheet = wb
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No sheets in workbook"))?;
 
     let total = sheet.row_count();
@@ -1235,7 +1575,10 @@ fn cmd_sample(
     } else if let Some(f) = frac {
         ((total as f64) * f.clamp(0.0, 1.0)) as usize
     } else {
-        return Err(ExcliError::new(ErrorCode::GeneralError, "Specify --n <count> or --frac <fraction>"));
+        return Err(ExcliError::new(
+            ErrorCode::GeneralError,
+            "Specify --n <count> or --frac <fraction>",
+        ));
     };
 
     let indices = sample_row_indices(total, sample_n);
@@ -1248,7 +1591,11 @@ fn cmd_sample(
         }
     }
 
-    if json { print_sheet_json(&result); } else { print_sheet_csv(&result); }
+    if json {
+        print_sheet_json(&result);
+    } else {
+        print_sheet_csv(&result);
+    }
     Ok(())
 }
 
@@ -1294,21 +1641,65 @@ fn cmd_search(
 
 // ─── Replace ───────────────────────────────────────────────────────────────────
 
-fn cmd_replace(file: &str, find: &str, replace: &str, dry_run: bool, quiet: bool) -> ExcliResult<()> {
+fn cmd_replace(
+    file: &str,
+    find: &str,
+    replace: &str,
+    dry_run: bool,
+    quiet: bool,
+) -> ExcliResult<()> {
+    let format = excli_io::format_detect::detect_format(Path::new(file))?;
+    if matches!(
+        format,
+        excli_core::types::FileFormat::Xlsx | excli_core::types::FileFormat::Xlsm
+    ) {
+        let total = excli_io::ooxml_edit::replace_text(Path::new(file), find, replace, dry_run)?;
+        if dry_run {
+            println!(
+                "DRY RUN: would replace {} occurrence(s) of '{}' with '{}'",
+                total, find, replace
+            );
+        } else if !quiet {
+            println!(
+                "Replaced {} occurrence(s) of '{}' with '{}'",
+                total, find, replace
+            );
+        }
+        return Ok(());
+    }
+    if !matches!(
+        format,
+        excli_core::types::FileFormat::Csv | excli_core::types::FileFormat::Tsv
+    ) {
+        return Err(ExcliError::new(
+            ErrorCode::NotImplemented,
+            "Safe replacement supports XLSX, XLSM, CSV and TSV",
+        ));
+    }
     let mut wb = excli_io::reader::read_workbook(Path::new(file))?;
 
-    let total: usize = wb.sheets.iter_mut().map(|s| {
-        let (new_sheet, count) = replace_cells(s, find, replace, false, dry_run);
-        *s = new_sheet;
-        count
-    }).sum();
+    let total: usize = wb
+        .sheets
+        .iter_mut()
+        .map(|s| {
+            let (new_sheet, count) = replace_cells(s, find, replace, false, dry_run);
+            *s = new_sheet;
+            count
+        })
+        .sum();
 
     if dry_run {
-        println!("DRY RUN: would replace {} occurrence(s) of '{}' with '{}'", total, find, replace);
+        println!(
+            "DRY RUN: would replace {} occurrence(s) of '{}' with '{}'",
+            total, find, replace
+        );
     } else {
         excli_io::writer::write_workbook(Path::new(file), &wb)?;
         if !quiet {
-            println!("Replaced {} occurrence(s) of '{}' with '{}'", total, find, replace);
+            println!(
+                "Replaced {} occurrence(s) of '{}' with '{}'",
+                total, find, replace
+            );
         }
     }
     Ok(())
@@ -1333,7 +1724,10 @@ fn cmd_info(file: &str, detailed: bool, schema: bool, json: bool) -> ExcliResult
                     }).collect()
                 })
                 .unwrap_or_default();
-            println!("{}", serde_json::to_string_pretty(&schema_info).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&schema_info).unwrap_or_default()
+            );
         }
         return Ok(());
     }
@@ -1348,18 +1742,25 @@ fn cmd_info(file: &str, detailed: bool, schema: bool, json: bool) -> ExcliResult
             "file_size_bytes": stats.file_size_bytes,
         });
         if detailed {
-            let sheets: Vec<serde_json::Value> = wb.sheets.iter().map(|s| {
-                serde_json::json!({
-                    "name": s.name,
-                    "rows": s.row_count(),
-                    "cols": s.col_count(),
-                    "formulas": s.stats().formula_count,
-                    "hidden": s.state != SheetState::Visible,
+            let sheets: Vec<serde_json::Value> = wb
+                .sheets
+                .iter()
+                .map(|s| {
+                    serde_json::json!({
+                        "name": s.name,
+                        "rows": s.row_count(),
+                        "cols": s.col_count(),
+                        "formulas": s.stats().formula_count,
+                        "hidden": s.state != SheetState::Visible,
+                    })
                 })
-            }).collect();
+                .collect();
             info["sheet_details"] = serde_json::Value::Array(sheets);
         }
-        println!("{}", serde_json::to_string_pretty(&info).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&info).unwrap_or_default()
+        );
     } else {
         println!("File:     {}", file);
         println!("Sheets:   {}", stats.sheet_count);
@@ -1370,7 +1771,12 @@ fn cmd_info(file: &str, detailed: bool, schema: bool, json: bool) -> ExcliResult
         if detailed {
             println!("\nSheet details:");
             for s in &wb.sheets {
-                println!("  {:<30} {} rows x {} cols", s.name, s.row_count(), s.col_count());
+                println!(
+                    "  {:<30} {} rows x {} cols",
+                    s.name,
+                    s.row_count(),
+                    s.col_count()
+                );
             }
         }
     }
@@ -1388,7 +1794,47 @@ fn infer_type(val: &CellValue) -> &'static str {
 
 // ─── Convert ───────────────────────────────────────────────────────────────────
 
-fn cmd_convert(input: &str, output: &str, sheet: Option<&str>, _delimiter: Option<&str>, quiet: bool) -> ExcliResult<()> {
+fn cmd_convert(
+    input: &str,
+    output: &str,
+    sheet: Option<&str>,
+    _delimiter: Option<&str>,
+    quiet: bool,
+) -> ExcliResult<()> {
+    let input_format = excli_io::format_detect::detect_format(Path::new(input))?;
+    let output_format = excli_io::format_detect::detect_format(Path::new(output))?;
+    if let Some(name) = sheet {
+        if input_format == excli_core::types::FileFormat::Xlsx
+            && output_format == excli_core::types::FileFormat::Xlsx
+        {
+            excli_io::writer::copy_workbook_sheet(Path::new(input), Path::new(output), name)?;
+            if !quiet {
+                println!("Extracted sheet {} from {} -> {}", name, input, output);
+            }
+            return Ok(());
+        }
+    }
+    if sheet.is_none() {
+        if input_format == output_format
+            && matches!(
+                input_format,
+                excli_core::types::FileFormat::Xlsx
+                    | excli_core::types::FileFormat::Xlsm
+                    | excli_core::types::FileFormat::Xlsb
+                    | excli_core::types::FileFormat::Xls
+                    | excli_core::types::FileFormat::Ods
+            )
+        {
+            excli_io::writer::copy_workbook_unchanged(Path::new(input), Path::new(output))?;
+            if !quiet {
+                println!(
+                    "Copied {} -> {} without changing the workbook",
+                    input, output
+                );
+            }
+            return Ok(());
+        }
+    }
     let mut wb = excli_io::reader::read_workbook(Path::new(input))?;
     if let Some(name) = sheet {
         wb.sheets.retain(|s| s.name == name);
@@ -1397,7 +1843,9 @@ fn cmd_convert(input: &str, output: &str, sheet: Option<&str>, _delimiter: Optio
         }
     }
     excli_io::writer::write_workbook(Path::new(output), &wb)?;
-    if !quiet { println!("Converted {} -> {}", input, output); }
+    if !quiet {
+        println!("Converted {} -> {}", input, output);
+    }
     Ok(())
 }
 
@@ -1413,7 +1861,8 @@ fn cmd_clean(
     quiet: bool,
 ) -> ExcliResult<()> {
     let wb = excli_io::reader::read_workbook(Path::new(file))?;
-    let sheet = wb.sheet_by_index(0)
+    let sheet = wb
+        .sheet_by_index(0)
         .ok_or_else(|| ExcliError::new(ErrorCode::GeneralError, "No sheets in workbook"))?;
 
     let result = match command.to_lowercase().as_str() {
@@ -1438,8 +1887,14 @@ fn cmd_clean(
             format!("Unknown clean command '{}'. Try: trim, upper, lower, proper, drop-blanks, fill-forward, fill, dedup", other))),
     };
 
-    if json { print_sheet_json(&result); } else { print_sheet_csv(&result); }
-    if !quiet { eprintln!("Clean '{}' applied to {}", command, file); }
+    if json {
+        print_sheet_json(&result);
+    } else {
+        print_sheet_csv(&result);
+    }
+    if !quiet {
+        eprintln!("Clean '{}' applied to {}", command, file);
+    }
     Ok(())
 }
 
@@ -1468,7 +1923,11 @@ fn cmd_diff(
 
     for sheet1 in &wb1.sheets {
         let sname = &sheet1.name;
-        if let Some(ref filter) = sheet { if sname != filter { continue; } }
+        if let Some(ref filter) = sheet {
+            if sname != filter {
+                continue;
+            }
+        }
 
         match wb2.sheet_by_name(sname) {
             None => diffs.push(DiffEntry {
@@ -1484,23 +1943,39 @@ fn cmd_diff(
                 for row in 0..max_rows {
                     for col in 0..max_cols {
                         let get_val = |s: &excli_core::Sheet| -> String {
-                            s.get_cell(col as u32, row as u32).map(|c| {
-                                if values_only { c.value.to_string() }
-                                else { c.formula.as_ref().map(|f| f.raw.clone()).unwrap_or_else(|| c.value.to_string()) }
-                            }).unwrap_or_default()
+                            s.get_cell(col as u32, row as u32)
+                                .map(|c| {
+                                    if values_only {
+                                        c.value.to_string()
+                                    } else {
+                                        c.formula
+                                            .as_ref()
+                                            .map(|f| f.raw.clone())
+                                            .unwrap_or_else(|| c.value.to_string())
+                                    }
+                                })
+                                .unwrap_or_default()
                         };
                         let v1 = get_val(sheet1);
                         let v2 = get_val(sheet2);
                         if v1 != v2 {
                             let within_tol = tolerance.map_or(false, |tol| {
-                                v1.parse::<f64>().ok().zip(v2.parse::<f64>().ok())
+                                v1.parse::<f64>()
+                                    .ok()
+                                    .zip(v2.parse::<f64>().ok())
                                     .map_or(false, |(n1, n2)| (n1 - n2).abs() <= tol)
                             });
                             if !within_tol {
                                 diffs.push(DiffEntry {
-                                    location: format!("{}!{}{}", sname,
-                                        excli_core::reference::column_index_to_name(col as u32), row + 1),
-                                    file1: v1, file2: v2, kind: "changed".to_string(),
+                                    location: format!(
+                                        "{}!{}{}",
+                                        sname,
+                                        excli_core::reference::column_index_to_name(col as u32),
+                                        row + 1
+                                    ),
+                                    file1: v1,
+                                    file2: v2,
+                                    kind: "changed".to_string(),
                                 });
                             }
                         }
@@ -1522,12 +1997,17 @@ fn cmd_diff(
     }
 
     if json {
-        println!("{}", serde_json::to_string_pretty(&diffs).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&diffs).unwrap_or_default()
+        );
     } else if diffs.is_empty() {
         println!("No differences found.");
     } else {
         println!("{} difference(s):", diffs.len());
-        for d in &diffs { println!("  {} | {:?} -> {:?}", d.location, d.file1, d.file2); }
+        for d in &diffs {
+            println!("  {} | {:?} -> {:?}", d.location, d.file1, d.file2);
+        }
     }
     Ok(())
 }
@@ -1536,11 +2016,17 @@ fn cmd_diff(
 
 fn cmd_batch(glob_pattern: &str, command: &[String], quiet: bool) -> ExcliResult<()> {
     if command.is_empty() {
-        return Err(ExcliError::new(ErrorCode::GeneralError, "No command specified for batch"));
+        return Err(ExcliError::new(
+            ErrorCode::GeneralError,
+            "No command specified for batch",
+        ));
     }
 
     let parent = Path::new(glob_pattern).parent().unwrap_or(Path::new("."));
-    let pattern = Path::new(glob_pattern).file_name().and_then(|s| s.to_str()).unwrap_or(glob_pattern);
+    let pattern = Path::new(glob_pattern)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(glob_pattern);
 
     let mut matched: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(entries) = std::fs::read_dir(parent) {
@@ -1553,19 +2039,38 @@ fn cmd_batch(glob_pattern: &str, command: &[String], quiet: bool) -> ExcliResult
     matched.sort();
 
     if matched.is_empty() {
-        if !quiet { println!("No files matched: {}", glob_pattern); }
+        if !quiet {
+            println!("No files matched: {}", glob_pattern);
+        }
         return Ok(());
     }
 
     let (mut ok, mut err) = (0usize, 0usize);
     for path in &matched {
-        if !quiet { println!("Processing: {}", path.display()); }
+        if !quiet {
+            println!("Processing: {}", path.display());
+        }
         match excli_io::reader::read_workbook(path) {
-            Ok(_) => { ok += 1; if !quiet { println!("  OK"); } }
-            Err(e) => { err += 1; eprintln!("  ERROR: {}", e); }
+            Ok(_) => {
+                ok += 1;
+                if !quiet {
+                    println!("  OK");
+                }
+            }
+            Err(e) => {
+                err += 1;
+                eprintln!("  ERROR: {}", e);
+            }
         }
     }
-    if !quiet { println!("Batch complete: {}/{} ok, {} errors", ok, matched.len(), err); }
+    if !quiet {
+        println!(
+            "Batch complete: {}/{} ok, {} errors",
+            ok,
+            matched.len(),
+            err
+        );
+    }
     Ok(())
 }
 
@@ -1574,7 +2079,11 @@ fn cmd_batch(glob_pattern: &str, command: &[String], quiet: bool) -> ExcliResult
 fn cmd_detect_encoding(file: &str, _all: bool) -> ExcliResult<()> {
     let data = std::fs::read(file)?;
     let info = excli_io::format_detect::detect_encoding(&data);
-    println!("{} (confidence: {:.1}%)", info.encoding, info.confidence * 100.0);
+    println!(
+        "{} (confidence: {:.1}%)",
+        info.encoding,
+        info.confidence * 100.0
+    );
     Ok(())
 }
 
@@ -1586,26 +2095,45 @@ fn cmd_detect_lang(file: &str, json: bool) -> ExcliResult<()> {
         for row in &sheet.rows {
             for cell in &row.cells {
                 for ch in cell.value.to_string().chars() {
-                    if ('\u{4E00}'..='\u{9FFF}').contains(&ch) || ('\u{3040}'..='\u{30FF}').contains(&ch) { cjk += 1; }
-                    else if ('\u{0600}'..='\u{06FF}').contains(&ch) { arabic += 1; }
-                    else if ('\u{0400}'..='\u{04FF}').contains(&ch) { cyrillic += 1; }
-                    else if ch.is_ascii_alphabetic() { latin += 1; }
+                    if ('\u{4E00}'..='\u{9FFF}').contains(&ch)
+                        || ('\u{3040}'..='\u{30FF}').contains(&ch)
+                    {
+                        cjk += 1;
+                    } else if ('\u{0600}'..='\u{06FF}').contains(&ch) {
+                        arabic += 1;
+                    } else if ('\u{0400}'..='\u{04FF}').contains(&ch) {
+                        cyrillic += 1;
+                    } else if ch.is_ascii_alphabetic() {
+                        latin += 1;
+                    }
                 }
             }
         }
     }
 
     let max = cjk.max(latin).max(arabic).max(cyrillic);
-    let dominant = if max == 0 { "unknown" }
-    else if cjk == max { "zh/ja/ko" }
-    else if arabic == max { "ar" }
-    else if cyrillic == max { "ru/uk" }
-    else { "en/latin" };
+    let dominant = if max == 0 {
+        "unknown"
+    } else if cjk == max {
+        "zh/ja/ko"
+    } else if arabic == max {
+        "ar"
+    } else if cyrillic == max {
+        "ru/uk"
+    } else {
+        "en/latin"
+    };
 
     if json {
-        println!("{}", serde_json::json!({ "dominant": dominant, "cjk": cjk, "latin": latin, "arabic": arabic, "cyrillic": cyrillic }));
+        println!(
+            "{}",
+            serde_json::json!({ "dominant": dominant, "cjk": cjk, "latin": latin, "arabic": arabic, "cyrillic": cyrillic })
+        );
     } else {
-        println!("Dominant: {} (CJK={}, Latin={}, Arabic={}, Cyrillic={})", dominant, cjk, latin, arabic, cyrillic);
+        println!(
+            "Dominant: {} (CJK={}, Latin={}, Arabic={}, Cyrillic={})",
+            dominant, cjk, latin, arabic, cyrillic
+        );
     }
     Ok(())
 }
@@ -1624,9 +2152,16 @@ fn cmd_validate(file: &str, reference: &str, json: bool, quiet: bool) -> ExcliRe
                 if let (Some(rh), Some(dh)) = (ref_sheet.rows.first(), data_sheet.rows.first()) {
                     for (i, rc) in rh.cells.iter().enumerate() {
                         let rv = rc.value.to_string();
-                        let dv = dh.cells.get(i).map(|c| c.value.to_string()).unwrap_or_default();
+                        let dv = dh
+                            .cells
+                            .get(i)
+                            .map(|c| c.value.to_string())
+                            .unwrap_or_default();
                         if rv != dv {
-                            issues.push(format!("Column mismatch in '{}': expected '{}', found '{}'", ref_sheet.name, rv, dv));
+                            issues.push(format!(
+                                "Column mismatch in '{}': expected '{}', found '{}'",
+                                ref_sheet.name, rv, dv
+                            ));
                         }
                     }
                 }
@@ -1635,12 +2170,22 @@ fn cmd_validate(file: &str, reference: &str, json: bool, quiet: bool) -> ExcliRe
     }
 
     if json {
-        println!("{}", serde_json::json!({ "valid": issues.is_empty(), "issues": issues }));
+        println!(
+            "{}",
+            serde_json::json!({ "valid": issues.is_empty(), "issues": issues })
+        );
     } else if issues.is_empty() {
-        if !quiet { println!("Validation passed: {} matches schema of {}", file, reference); }
+        if !quiet {
+            println!(
+                "Validation passed: {} matches schema of {}",
+                file, reference
+            );
+        }
     } else {
         println!("{} issue(s):", issues.len());
-        for issue in &issues { println!("  - {}", issue); }
+        for issue in &issues {
+            println!("  - {}", issue);
+        }
     }
     Ok(())
 }
@@ -1678,10 +2223,16 @@ fn cmd_describe(command: Option<&str>, all: bool) -> ExcliResult<()> {
         let schema: Vec<serde_json::Value> = commands.iter().map(|(name, desc, usage)| {
             serde_json::json!({ "command": name, "description": desc, "usage": usage })
         }).collect();
-        println!("{}", serde_json::to_string_pretty(&schema).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&schema).unwrap_or_default()
+        );
     } else if let Some(cmd) = command {
         if let Some((_, desc, usage)) = commands.iter().find(|(n, _, _)| *n == cmd) {
-            println!("{}", serde_json::json!({ "command": cmd, "description": desc, "usage": usage }));
+            println!(
+                "{}",
+                serde_json::json!({ "command": cmd, "description": desc, "usage": usage })
+            );
         } else {
             println!("Unknown command '{}'. Use --all to list all.", cmd);
         }
@@ -1713,7 +2264,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name,Age\nAlice,30\nBob,25\n");
-        assert!(cmd_read(p.to_str().unwrap(), None, None, 0, None, false, false, false).is_ok());
+        assert!(cmd_read(
+            p.to_str().unwrap(),
+            None,
+            None,
+            0,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1729,7 +2290,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "H1,H2\nX,Y\n1,2\n3,4\n");
-        assert!(cmd_read(p.to_str().unwrap(), None, None, 1, Some(2), false, false, false).is_ok());
+        assert!(cmd_read(
+            p.to_str().unwrap(),
+            None,
+            None,
+            1,
+            Some(2),
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1742,7 +2313,16 @@ mod tests {
 
     #[test]
     fn test_cmd_read_nonexistent_file_errors() {
-        let result = cmd_read("/tmp/no_such_file_excli.csv", None, None, 0, None, false, false, false);
+        let result = cmd_read(
+            "/tmp/no_such_file_excli.csv",
+            None,
+            None,
+            0,
+            None,
+            false,
+            false,
+            false,
+        );
         assert!(result.is_err());
     }
 
@@ -1752,7 +2332,15 @@ mod tests {
     fn test_cmd_write_json_array() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.csv");
-        assert!(cmd_write(out.to_str().unwrap(), Some("[[1,2,3],[4,5,6]]"), None, None, false, true).is_ok());
+        assert!(cmd_write(
+            out.to_str().unwrap(),
+            Some("[[1,2,3],[4,5,6]]"),
+            None,
+            None,
+            false,
+            true
+        )
+        .is_ok());
         assert!(out.exists());
     }
 
@@ -1760,7 +2348,15 @@ mod tests {
     fn test_cmd_write_csv_text() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.csv");
-        assert!(cmd_write(out.to_str().unwrap(), Some("a,b,c\n1,2,3"), None, None, false, true).is_ok());
+        assert!(cmd_write(
+            out.to_str().unwrap(),
+            Some("a,b,c\n1,2,3"),
+            None,
+            None,
+            false,
+            true
+        )
+        .is_ok());
         let content = std::fs::read_to_string(&out).unwrap();
         assert!(content.contains("a") || content.contains("1"));
     }
@@ -1776,7 +2372,15 @@ mod tests {
     fn test_cmd_write_with_start_cell() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out.csv");
-        assert!(cmd_write(out.to_str().unwrap(), Some("X,Y"), None, Some("B2"), false, true).is_ok());
+        assert!(cmd_write(
+            out.to_str().unwrap(),
+            Some("X,Y"),
+            None,
+            Some("B2"),
+            false,
+            true
+        )
+        .is_ok());
     }
 
     // ── cmd_info ─────────────────────────────────────────────────────────────
@@ -1821,7 +2425,14 @@ mod tests {
         let src = dir.path().join("src.csv");
         let dst = dir.path().join("dst.csv");
         write_csv(&src, "A,B\n1,2\n");
-        assert!(cmd_convert(src.to_str().unwrap(), dst.to_str().unwrap(), None, None, true).is_ok());
+        assert!(cmd_convert(
+            src.to_str().unwrap(),
+            dst.to_str().unwrap(),
+            None,
+            None,
+            true
+        )
+        .is_ok());
         assert!(dst.exists());
     }
 
@@ -1842,7 +2453,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name,Score\nAlice,95\nBob,70\n");
-        assert!(cmd_filter(p.to_str().unwrap(), Some("B"), Some("80"), None, None, None, None, false, None, false, false, false).is_ok());
+        assert!(cmd_filter(
+            p.to_str().unwrap(),
+            Some("B"),
+            Some("80"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1850,7 +2475,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Dept\nEng\nEng\nHR\n");
-        assert!(cmd_filter(p.to_str().unwrap(), None, None, None, None, None, None, false, None, true, false, false).is_ok());
+        assert!(cmd_filter(
+            p.to_str().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            true,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1858,7 +2497,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A,B\n1,2\n");
-        assert!(cmd_filter(p.to_str().unwrap(), None, None, None, None, None, None, false, None, false, false, false).is_ok());
+        assert!(cmd_filter(
+            p.to_str().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     // ── cmd_sort ─────────────────────────────────────────────────────────────
@@ -1868,7 +2521,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name,Score\nCarol,88\nAlice,95\nBob,70\n");
-        assert!(cmd_sort(p.to_str().unwrap(), Some("B"), None, true, false, None, false, false).is_ok());
+        assert!(cmd_sort(
+            p.to_str().unwrap(),
+            Some("B"),
+            None,
+            true,
+            false,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1876,7 +2539,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A,B\n3,1\n1,2\n");
-        assert!(cmd_sort(p.to_str().unwrap(), Some("A"), None, true, false, None, false, false).is_ok());
+        assert!(cmd_sort(
+            p.to_str().unwrap(),
+            Some("A"),
+            None,
+            true,
+            false,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     // ── cmd_agg ──────────────────────────────────────────────────────────────
@@ -1886,7 +2559,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Dept,Salary\nEng,100\nEng,200\nHR,150\n");
-        assert!(cmd_agg(p.to_str().unwrap(), Some("A"), Some("B"), false, None, false, false).is_ok());
+        assert!(cmd_agg(
+            p.to_str().unwrap(),
+            Some("A"),
+            Some("B"),
+            false,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -1906,7 +2588,18 @@ mod tests {
         let p2 = dir.path().join("b.csv");
         write_csv(&p1, "ID,Name\n1,Alice\n2,Bob\n");
         write_csv(&p2, "ID,Score\n1,95\n3,80\n");
-        assert!(cmd_merge(p1.to_str().unwrap(), p2.to_str().unwrap(), Some("A"), "inner", None, None, false, false, false).is_ok());
+        assert!(cmd_merge(
+            p1.to_str().unwrap(),
+            p2.to_str().unwrap(),
+            Some("A"),
+            "inner",
+            None,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     // ── cmd_concat ───────────────────────────────────────────────────────────
@@ -1918,7 +2611,16 @@ mod tests {
         let p2 = dir.path().join("b.csv");
         write_csv(&p1, "A\n1\n");
         write_csv(&p2, "A\n2\n");
-        assert!(cmd_concat(&[p1.to_str().unwrap().to_string(), p2.to_str().unwrap().to_string()], "rows", false, false).is_ok());
+        assert!(cmd_concat(
+            &[
+                p1.to_str().unwrap().to_string(),
+                p2.to_str().unwrap().to_string()
+            ],
+            "rows",
+            false,
+            false
+        )
+        .is_ok());
     }
 
     // ── cmd_transpose ────────────────────────────────────────────────────────
@@ -1937,7 +2639,13 @@ mod tests {
         let p = dir.path().join("data.csv");
         let out = dir.path().join("out.csv");
         write_csv(&p, "A,B\n1,2\n3,4\n");
-        assert!(cmd_transpose(p.to_str().unwrap(), Some(out.to_str().unwrap()), false, true).is_ok());
+        assert!(cmd_transpose(
+            p.to_str().unwrap(),
+            Some(out.to_str().unwrap()),
+            false,
+            true
+        )
+        .is_ok());
         assert!(out.exists());
     }
 
@@ -1949,7 +2657,14 @@ mod tests {
         let p = dir.path().join("data.csv");
         let out = dir.path().join("out");
         write_csv(&p, "Name\nAlice\nBob\nCarol\nDave\n");
-        assert!(cmd_split(p.to_str().unwrap(), None, Some(2), Some(out.to_str().unwrap()), true).is_ok());
+        assert!(cmd_split(
+            p.to_str().unwrap(),
+            None,
+            Some(2),
+            Some(out.to_str().unwrap()),
+            true
+        )
+        .is_ok());
     }
 
     // ── cmd_sample ───────────────────────────────────────────────────────────
@@ -1969,7 +2684,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name,City\nAlice,New York\nBob,Boston\n");
-        assert!(cmd_search(p.to_str().unwrap(), "Alice", false, false, false, false, false).is_ok());
+        assert!(cmd_search(
+            p.to_str().unwrap(),
+            "Alice",
+            false,
+            false,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     // ── cmd_replace ──────────────────────────────────────────────────────────
@@ -2033,7 +2757,16 @@ mod tests {
         let p2 = dir.path().join("b.csv");
         write_csv(&p1, "A\n1\n");
         write_csv(&p2, "A\n1\n");
-        assert!(cmd_diff(p1.to_str().unwrap(), p2.to_str().unwrap(), None, false, None, false, false).is_ok());
+        assert!(cmd_diff(
+            p1.to_str().unwrap(),
+            p2.to_str().unwrap(),
+            None,
+            false,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2043,19 +2776,34 @@ mod tests {
         let p2 = dir.path().join("b.csv");
         write_csv(&p1, "A\n1\n");
         write_csv(&p2, "A\n2\n");
-        assert!(cmd_diff(p1.to_str().unwrap(), p2.to_str().unwrap(), None, false, None, false, false).is_ok());
+        assert!(cmd_diff(
+            p1.to_str().unwrap(),
+            p2.to_str().unwrap(),
+            None,
+            false,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     // ── cmd_describe ─────────────────────────────────────────────────────────
 
     #[test]
-    fn test_cmd_describe_all() { assert!(cmd_describe(None, true).is_ok()); }
+    fn test_cmd_describe_all() {
+        assert!(cmd_describe(None, true).is_ok());
+    }
 
     #[test]
-    fn test_cmd_describe_command() { assert!(cmd_describe(Some("read"), false).is_ok()); }
+    fn test_cmd_describe_command() {
+        assert!(cmd_describe(Some("read"), false).is_ok());
+    }
 
     #[test]
-    fn test_cmd_describe_no_args() { assert!(cmd_describe(None, false).is_ok()); }
+    fn test_cmd_describe_no_args() {
+        assert!(cmd_describe(None, false).is_ok());
+    }
 
     // ── cmd_detect_lang ──────────────────────────────────────────────────────
 
@@ -2118,7 +2866,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A,B\n1,2\n3,4\n5,6\n");
-        assert!(cmd_filter(p.to_str().unwrap(), Some("A"), None, Some("4"), None, None, None, false, None, false, false, false).is_ok());
+        assert!(cmd_filter(
+            p.to_str().unwrap(),
+            Some("A"),
+            None,
+            Some("4"),
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2127,7 +2889,21 @@ mod tests {
         let p = dir.path().join("data.csv");
         write_csv(&p, "A\n1\n\n3\n");
         // notnull filter via is_null=false, no other conditions = returns all
-        assert!(cmd_filter(p.to_str().unwrap(), None, None, None, None, None, None, false, None, false, false, false).is_ok());
+        assert!(cmd_filter(
+            p.to_str().unwrap(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2135,7 +2911,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A\n1\n3\n2\n");
-        assert!(cmd_sort(p.to_str().unwrap(), Some("A"), None, false, true, None, false, false).is_ok());
+        assert!(cmd_sort(
+            p.to_str().unwrap(),
+            Some("A"),
+            None,
+            false,
+            true,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2151,7 +2937,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A\n10\n20\n30\n");
-        assert!(cmd_agg(p.to_str().unwrap(), None, None, false, Some("A"), false, false).is_ok());
+        assert!(cmd_agg(
+            p.to_str().unwrap(),
+            None,
+            None,
+            false,
+            Some("A"),
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2244,7 +3039,14 @@ mod tests {
         let input = dir.path().join("data.csv");
         let output = dir.path().join("out.csv");
         write_csv(&input, "A,B\n1,2\n");
-        assert!(cmd_convert(input.to_str().unwrap(), output.to_str().unwrap(), None, None, false).is_ok());
+        assert!(cmd_convert(
+            input.to_str().unwrap(),
+            output.to_str().unwrap(),
+            None,
+            None,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2263,7 +3065,10 @@ mod tests {
         let p2 = dir.path().join("d2.csv");
         write_csv(&p1, "A\n1\n");
         write_csv(&p2, "A\n2\n");
-        let files = vec![p1.to_str().unwrap().to_string(), p2.to_str().unwrap().to_string()];
+        let files = vec![
+            p1.to_str().unwrap().to_string(),
+            p2.to_str().unwrap().to_string(),
+        ];
         assert!(cmd_concat(&files, "rows", false, false).is_ok());
     }
 
@@ -2301,7 +3106,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Age\n25\n30\n35\n");
-        assert!(cmd_filter(p.to_str().unwrap(), Some("Age"), Some("28"), None, None, None, None, false, None, false, false, false).is_ok());
+        assert!(cmd_filter(
+            p.to_str().unwrap(),
+            Some("Age"),
+            Some("28"),
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2309,7 +3128,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name\nZoe\nAlice\nBob\n");
-        assert!(cmd_sort(p.to_str().unwrap(), Some("Name"), None, true, false, None, false, false).is_ok());
+        assert!(cmd_sort(
+            p.to_str().unwrap(),
+            Some("Name"),
+            None,
+            true,
+            false,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2317,7 +3146,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Amount\n10\n20\n30\n");
-        assert!(cmd_agg(p.to_str().unwrap(), None, Some("Amount"), false, None, false, false).is_ok());
+        assert!(cmd_agg(
+            p.to_str().unwrap(),
+            None,
+            Some("Amount"),
+            false,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2325,7 +3163,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name\nAlice\nBob\nCarol\n");
-        assert!(cmd_search(p.to_str().unwrap(), "Alice", false, false, false, false, false).is_ok());
+        assert!(cmd_search(
+            p.to_str().unwrap(),
+            "Alice",
+            false,
+            false,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2350,7 +3197,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A\n1\n");
-        assert!(cmd_sheet(SheetCmd::List { file: p.to_str().unwrap().to_string() }, false).is_ok());
+        assert!(cmd_sheet(
+            SheetCmd::List {
+                file: p.to_str().unwrap().to_string()
+            },
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2358,7 +3211,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A,B\n1,2\n");
-        assert!(cmd_sheet(SheetCmd::Info { file: p.to_str().unwrap().to_string(), sheet: "Sheet1".to_string() }, false).is_ok());
+        assert!(cmd_sheet(
+            SheetCmd::Info {
+                file: p.to_str().unwrap().to_string(),
+                sheet: "Sheet1".to_string()
+            },
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2371,7 +3231,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A,B\n1,2\n3,4\n");
-        assert!(cmd_read(p.to_str().unwrap(), None, None, 0, None, false, false, false).is_ok());
+        assert!(cmd_read(
+            p.to_str().unwrap(),
+            None,
+            None,
+            0,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2381,7 +3251,14 @@ mod tests {
         write_csv(&p, "Name\nAlice\nBob\nCarol\nDave\nEve\n");
         let out = dir.path().join("out");
         std::fs::create_dir_all(&out).unwrap();
-        assert!(cmd_split(p.to_str().unwrap(), None, Some(2), Some(out.to_str().unwrap()), false).is_ok());
+        assert!(cmd_split(
+            p.to_str().unwrap(),
+            None,
+            Some(2),
+            Some(out.to_str().unwrap()),
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2397,10 +3274,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A\n1\n2\n");
-        assert!(cmd_formula(FormulaCmd::Read {
-            file: p.to_str().unwrap().to_string(),
-            sheet: None, range: None, evaluate: false, both: false,
-        }, false).is_ok());
+        assert!(cmd_formula(
+            FormulaCmd::Read {
+                file: p.to_str().unwrap().to_string(),
+                sheet: None,
+                range: None,
+                evaluate: false,
+                both: false,
+            },
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2448,7 +3332,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A,B\n1,2\n3,4\n5,6\n");
-        assert!(cmd_read(p.to_str().unwrap(), None, None, 1, None, false, false, false).is_ok());
+        assert!(cmd_read(
+            p.to_str().unwrap(),
+            None,
+            None,
+            1,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2456,7 +3350,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "A,B\n1,2\n3,4\n5,6\n7,8\n");
-        assert!(cmd_read(p.to_str().unwrap(), None, None, 0, Some(2), false, false, false).is_ok());
+        assert!(cmd_read(
+            p.to_str().unwrap(),
+            None,
+            None,
+            0,
+            Some(2),
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2464,7 +3368,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name\nAlice\n\nBob\n");
-        assert!(cmd_clean(p.to_str().unwrap(), "fill-forward", None, None, None, false, false).is_ok());
+        assert!(cmd_clean(
+            p.to_str().unwrap(),
+            "fill-forward",
+            None,
+            None,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2473,7 +3386,14 @@ mod tests {
         let p_in = dir.path().join("in2.csv");
         let p_out = dir.path().join("out2.csv");
         write_csv(&p_in, "A,B\n1,2\n");
-        assert!(cmd_convert(p_in.to_str().unwrap(), p_out.to_str().unwrap(), None, None, false).is_ok());
+        assert!(cmd_convert(
+            p_in.to_str().unwrap(),
+            p_out.to_str().unwrap(),
+            None,
+            None,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2489,7 +3409,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data3.csv");
         write_csv(&p, "A,B\n1,2\n3,4\n");
-        let r = cmd_diff(p.to_str().unwrap(), p.to_str().unwrap(), None, false, None, false, false);
+        let r = cmd_diff(
+            p.to_str().unwrap(),
+            p.to_str().unwrap(),
+            None,
+            false,
+            None,
+            false,
+            false,
+        );
         assert!(r.is_ok());
     }
 
@@ -2529,7 +3457,21 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name,Val\nAlice,1\n,2\nBob,\n");
-        assert!(cmd_filter(p.to_str().unwrap(), Some("A"), None, None, None, None, None, true, None, false, false, false).is_ok());
+        assert!(cmd_filter(
+            p.to_str().unwrap(),
+            Some("A"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            true,
+            None,
+            false,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2537,7 +3479,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Name,Score\nAlice,90\nBob,85\nCarol,90\n");
-        assert!(cmd_sort(p.to_str().unwrap(), None, Some("A,B"), true, false, None, false, false).is_ok());
+        assert!(cmd_sort(
+            p.to_str().unwrap(),
+            None,
+            Some("A,B"),
+            true,
+            false,
+            None,
+            false,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2545,7 +3497,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("data.csv");
         write_csv(&p, "Cat,Val\nA,10\nA,20\nB,30\n");
-        assert!(cmd_agg(p.to_str().unwrap(), Some("A"), None, true, None, true, false).is_ok());
+        assert!(cmd_agg(
+            p.to_str().unwrap(),
+            Some("A"),
+            None,
+            true,
+            None,
+            true,
+            false
+        )
+        .is_ok());
     }
 
     #[test]
@@ -2563,7 +3524,14 @@ mod tests {
         let out = dir.path().join("out2");
         std::fs::create_dir_all(&out).unwrap();
         write_csv(&p, "Cat,Val\nA,1\nB,2\nA,3\n");
-        assert!(cmd_split(p.to_str().unwrap(), Some("A"), None, Some(out.to_str().unwrap()), false).is_ok());
+        assert!(cmd_split(
+            p.to_str().unwrap(),
+            Some("A"),
+            None,
+            Some(out.to_str().unwrap()),
+            false
+        )
+        .is_ok());
     }
 
     #[test]
