@@ -62,11 +62,17 @@
 
 ## 快速开始
 
-### 安装
+### 从源码安装
 
 ```bash
-cargo install excli
+git clone https://github.com/lizhaoting/excli.git
+cd excli
+cargo build --release -p excli-cli
+./target/release/excli-cli --version
 ```
+
+当前仓库暂无预编译发布包。[excli 工作簿 skill 包](skills/excli-workbooks.zip)只包含 Agent 指令，命令行程序需要单独构建。
+下文的 `excli` 命令是简写；直接运行源码构建结果时，请替换为 `./target/release/excli-cli`。
 
 ### 基础用法
 

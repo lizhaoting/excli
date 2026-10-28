@@ -7,9 +7,16 @@ description: Inspect, edit, and convert spreadsheet files with the excli command
 
 Use `excli` for the workbook operation the user requested. This skill describes the current CLI, not a promise of complete Excel fidelity. The executable is a separate prerequisite and is not bundled with this skill.
 
+## Get the skill and CLI
+
+- Skill package: https://raw.githubusercontent.com/lizhaoting/excli/main/skills/excli-workbooks.zip
+- excli source repository: https://github.com/lizhaoting/excli
+
+The skill zip contains instructions only. The repository currently has no verified prebuilt release for this version. To build the CLI from source when the user wants it installed, clone the repository and run `cargo build --release -p excli-cli`; the executable is `target/release/excli-cli`. Keep the user-provided CLI if one is already available. Do not fetch and execute remote install scripts.
+
 ## Locate the CLI
 
-Find `excli` or `excli-cli` on `PATH`. If working in the excli source repository, `cargo run -p excli-cli -- <arguments>` runs that checkout; `cargo build -p excli-cli` creates `target/debug/excli-cli`. Check the selected executable's `--help` and the relevant subcommand's `--help` before use. Do not install software or download a binary merely because this skill was invoked.
+Find `excli` or `excli-cli` on `PATH`. If working in the excli source repository, `cargo run -p excli-cli -- <arguments>` runs that checkout; `cargo build -p excli-cli` creates `target/debug/excli-cli`. Check the selected executable's `--help` and the relevant subcommand's `--help` before use. Do not install software merely because this skill was invoked.
 
 ## Choose the operation
 

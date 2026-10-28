@@ -65,36 +65,17 @@ For an unchanged workbook in the same format, `excli convert report.xlsx backup.
 
 ## Installation
 
-### From Cargo
-
-```bash
-cargo install excli
-```
-
-### From Binary (macOS / Linux / Windows)
-
-```bash
-# macOS (Intel)
-curl -L https://github.com/excli/excli/releases/download/v0.1.0/excli-x86_64-apple-darwin.tar.gz | tar xz
-sudo mv excli /usr/local/bin/
-
-# macOS (ARM)
-curl -L https://github.com/excli/excli/releases/download/v0.1.0/excli-aarch64-apple-darwin.tar.gz | tar xz
-sudo mv excli /usr/local/bin/
-
-# Linux
-curl -L https://github.com/excli/excli/releases/download/v0.1.0/excli-x86_64-unknown-linux-gnu.tar.gz | tar xz
-sudo mv excli /usr/local/bin/
-```
-
 ### From Source
 
 ```bash
-git clone https://github.com/excli/excli.git
+git clone https://github.com/lizhaoting/excli.git
 cd excli
-cargo build --release
+cargo build --release -p excli-cli
 ./target/release/excli-cli --version
 ```
+
+Prebuilt release binaries are not currently available for this repository. The [excli workbook skill package](skills/excli-workbooks.zip) contains agent instructions and requires a separately built CLI.
+The examples below use `excli` as shorthand; substitute `./target/release/excli-cli` when running the source build directly.
 
 ---
 
